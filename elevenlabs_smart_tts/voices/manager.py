@@ -16,19 +16,24 @@ class VoiceManager:
         self,
         config: SmartTTSConfig,
         cache: CacheStore,
-        client: ElevenLabsClient,
+        client: ElevenLabsClient | None = None,
     ) -> None:
         self._config = config
         self._cache = cache
         self._client = client
 
     def sync_voices(self, *, force: bool = False) -> int:
+        if self._client is None:
+            raise RuntimeError("VoiceManager.sync_voices() requires an ElevenLabsClient")
         if not force and self._cache.is_voice_list_fresh():
             voice_ids = self._cache.list_voice_ids()
             logger.info("voice_sync_skipped", extra={"cached_count": len(voice_ids)})
             return len(voice_ids)
 
         voices = self._client.list_voices()
+        return self.store_voices(voices)
+
+    def store_voices(self, voices: list[CachedVoice]) -> int:
         now = datetime.now(timezone.utc)
         voice_ids: list[str] = []
         for voice in voices:

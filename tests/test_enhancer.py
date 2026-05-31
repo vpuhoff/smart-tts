@@ -5,7 +5,11 @@ import pytest
 import respx
 
 from elevenlabs_smart_tts.client.openrouter import OpenRouterClient
-from elevenlabs_smart_tts.enhancement.enhancer import TextEnhancer
+from elevenlabs_smart_tts.enhancement.enhancer import (
+    TextEnhancer,
+    preserved_word_ratio,
+    semantic_words,
+)
 from elevenlabs_smart_tts.enhancement.prompts import PromptBuilder
 from elevenlabs_smart_tts.exceptions import TextEnhancementError
 from elevenlabs_smart_tts.models import SynthesisTask, TTSModel
@@ -126,16 +130,15 @@ def test_enhancer_allows_number_and_html_normalization(config, sample_voice) -> 
 
 
 def test_semantic_word_validation_helpers() -> None:
-    enhancer = TextEnhancer.__new__(TextEnhancer)
     original = "<b>26 мая</b> agronews.com текст"
     enhanced = "двадцать шестое мая агроньюс точка ком текст"
 
-    original_semantic = enhancer._semantic_words(original)
-    enhanced_semantic = enhancer._semantic_words(enhanced)
+    original_semantic = semantic_words(original)
+    enhanced_semantic = semantic_words(enhanced)
 
     assert "май" in original_semantic or "мая" in original_semantic
     assert "agronews" not in original_semantic
     assert "com" not in original_semantic
-    ratio = enhancer._preserved_word_ratio(original_semantic, enhanced_semantic)
+    ratio = preserved_word_ratio(original_semantic, enhanced_semantic)
     assert ratio >= 0.30
 

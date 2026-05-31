@@ -1,5 +1,6 @@
 """ElevenLabs Smart TTS library."""
 
+from elevenlabs_smart_tts.async_tts import AsyncSmartTTS, asynthesize
 from elevenlabs_smart_tts.config import SmartTTSConfig
 from elevenlabs_smart_tts.models import (
     CachedVoice,
@@ -12,6 +13,7 @@ from elevenlabs_smart_tts.models import (
 from elevenlabs_smart_tts.tts import SmartTTS, synthesize
 
 __all__ = [
+    "AsyncSmartTTS",
     "CachedVoice",
     "OutputFormat",
     "SmartTTS",
@@ -20,6 +22,7 @@ __all__ = [
     "SynthesisTask",
     "TTSModel",
     "VoiceSettings",
+    "asynthesize",
     "synthesize",
 ]
 

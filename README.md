@@ -252,6 +252,29 @@ result = synthesize(
 )
 ```
 
+### Async API
+
+```python
+import asyncio
+from pathlib import Path
+
+from elevenlabs_smart_tts import AsyncSmartTTS, SynthesisTask, asynthesize
+
+async def main() -> None:
+    async with AsyncSmartTTS.from_env() as tts:
+        await tts.sync_voices()
+        result = await tts.synthesize_to_file(
+            SynthesisTask(text="Hello world", language="en"),
+            Path("output.mp3"),
+        )
+        print(result.enhanced_text)
+
+asyncio.run(main())
+
+# Or as a one-liner:
+result = asyncio.run(asynthesize("Hello world", language="en"))
+```
+
 ### Voice management
 
 ```python
