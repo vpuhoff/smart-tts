@@ -23,4 +23,7 @@ __all__ = [
     "synthesize",
 ]
 
-__version__ = "0.1.0"
+try:
+    from elevenlabs_smart_tts._version import __version__
+except ImportError:
+    __version__ = "0.0.0+unknown"
