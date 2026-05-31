@@ -2,7 +2,7 @@
 name = "elevenlabs-smart-tts"
 dynamic = ["version"]
 description = "Smart TTS library with ElevenLabs and OpenRouter text enhancement"
-readme = "spec.md"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [{ name = "vpuhoff" }]
