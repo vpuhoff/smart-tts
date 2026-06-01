@@ -20,7 +20,7 @@ class VoiceSelector:
 
         if task.voice_id:
             voice = self._resolve_explicit_voice(task, voices)
-            self._validate_model_compatibility(voice, model)
+            self._validate_model_compatibility(voice, model, allow_explicit=True)
             logger.info(
                 "voice_selected",
                 extra={
@@ -181,13 +181,28 @@ class VoiceSelector:
     @staticmethod
     def _is_pvc(voice: CachedVoice) -> bool:
         category = voice.category.lower()
-        return category in {"cloned", "professional"} or voice.labels.get("category", "").lower() == "pvc"
+        if category == "cloned":
+            return True
+        return voice.labels.get("category", "").lower() == "pvc"
 
-    def _validate_model_compatibility(self, voice: CachedVoice, model: TTSModel) -> None:
-        if model == TTSModel.ELEVEN_V3 and self._is_pvc(voice):
-            raise ModelVoiceIncompatibleError(
-                f"Voice {voice.voice_id} ({voice.category}) is not recommended for eleven_v3."
+    def _validate_model_compatibility(
+        self,
+        voice: CachedVoice,
+        model: TTSModel,
+        *,
+        allow_explicit: bool = False,
+    ) -> None:
+        if model != TTSModel.ELEVEN_V3 or not self._is_pvc(voice):
+            return
+        if allow_explicit:
+            logger.warning(
+                "voice may be a clone not recommended for eleven_v3; using explicit voice_id anyway",
+                extra={"voice_id": voice.voice_id, "category": voice.category},
             )
+            return
+        raise ModelVoiceIncompatibleError(
+            f"Voice {voice.voice_id} ({voice.category}) is not recommended for eleven_v3."
+        )
 
     def _compatible_voices(self, voices: list[CachedVoice], model: TTSModel) -> list[CachedVoice]:
         if model == TTSModel.ELEVEN_V3:
