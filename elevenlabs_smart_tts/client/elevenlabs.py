@@ -1,31 +1,147 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
+from elevenlabs.client import AsyncElevenLabs, ElevenLabs
+from elevenlabs.core.api_error import ApiError
+from elevenlabs.types import Voice, VoiceSettings as SdkVoiceSettings
 
-from elevenlabs_smart_tts.client.retry import async_request_with_retry, request_with_retry
 from elevenlabs_smart_tts.config import SmartTTSConfig
 from elevenlabs_smart_tts.exceptions import ElevenLabsAPIError
-from elevenlabs_smart_tts.models import CachedVoice, TTSRequest
+from elevenlabs_smart_tts.models import CachedVoice, TTSRequest, VoiceSettings
+
+T = TypeVar("T")
+
+
+def map_voice_response(data: dict[str, Any] | Voice) -> CachedVoice:
+    if isinstance(data, Voice):
+        voice_id = data.voice_id
+        name = data.name or ""
+        description = data.description
+        labels = dict(data.labels or {})
+        category = data.category or "premade"
+        preview_url = data.preview_url
+    else:
+        labels = data.get("labels") or {}
+        voice_id = data["voice_id"]
+        name = data.get("name", "")
+        description = data.get("description")
+        category = data.get("category", "premade")
+        preview_url = data.get("preview_url")
+
+    language = labels.get("language") or labels.get("accent")
+    return CachedVoice(
+        voice_id=voice_id,
+        name=name,
+        description=description,
+        labels=labels,
+        category=category,
+        preview_url=preview_url,
+        language=language,
+        cached_at=datetime.now(timezone.utc),
+    )
+
+
+def _to_sdk_voice_settings(settings: VoiceSettings) -> SdkVoiceSettings:
+    return SdkVoiceSettings(
+        stability=settings.stability,
+        similarity_boost=settings.similarity_boost,
+        style=settings.style,
+        speed=settings.speed,
+        use_speaker_boost=settings.use_speaker_boost,
+    )
+
+
+def _api_error_detail(exc: ApiError) -> str:
+    body = exc.body
+    if isinstance(body, str):
+        return body
+    return str(body)
+
+
+def _raise_api_error(exc: ApiError) -> None:
+    raise ElevenLabsAPIError(exc.status_code or 0, _api_error_detail(exc)) from exc
+
+
+def _is_retryable(exc: ApiError) -> bool:
+    status_code = exc.status_code or 0
+    return status_code == 429 or status_code >= 500
+
+
+def _call_with_retry(fn: Callable[[], T], *, max_retries: int = 3) -> T:
+    last_error: ApiError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return fn()
+        except ApiError as exc:
+            last_error = exc
+            if not _is_retryable(exc) or attempt >= max_retries:
+                _raise_api_error(exc)
+            time.sleep(2**attempt)
+    assert last_error is not None
+    _raise_api_error(last_error)
+    raise AssertionError("unreachable")
+
+
+async def _await_with_retry(
+    fn: Callable[[], Awaitable[T]],
+    *,
+    max_retries: int = 3,
+) -> T:
+    last_error: ApiError | None = None
+    for attempt in range(max_retries + 1):
+        try:
+            return await fn()
+        except ApiError as exc:
+            last_error = exc
+            if not _is_retryable(exc) or attempt >= max_retries:
+                _raise_api_error(exc)
+            await asyncio.sleep(2**attempt)
+    assert last_error is not None
+    _raise_api_error(last_error)
+    raise AssertionError("unreachable")
+
+
+def _collect_audio(chunks: Iterator[bytes]) -> bytes:
+    return b"".join(chunk for chunk in chunks if isinstance(chunk, bytes))
+
+
+async def _collect_audio_async(chunks: AsyncIterator[bytes]) -> bytes:
+    parts: list[bytes] = []
+    async for chunk in chunks:
+        if isinstance(chunk, bytes):
+            parts.append(chunk)
+    return b"".join(parts)
 
 
 class ElevenLabsClient:
-    BASE_URL = "https://api.elevenlabs.io/v1"
-
-    def __init__(self, config: SmartTTSConfig, *, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        config: SmartTTSConfig,
+        *,
+        client: ElevenLabs | None = None,
+        httpx_client: httpx.Client | None = None,
+    ) -> None:
         self._config = config
-        self._client = client or httpx.Client(
-            base_url=self.BASE_URL,
-            headers={"xi-api-key": config.elevenlabs_api_key},
-            timeout=60.0,
-        )
-        self._owns_client = client is None
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = ElevenLabs(
+                api_key=config.elevenlabs_api_key,
+                httpx_client=httpx_client,
+                timeout=60.0,
+            )
+            self._owns_client = httpx_client is None
 
     def close(self) -> None:
         if self._owns_client:
-            self._client.close()
+            self._client._client_wrapper.httpx_client.httpx_client.close()
 
     def __enter__(self) -> ElevenLabsClient:
         return self
@@ -34,78 +150,60 @@ class ElevenLabsClient:
         self.close()
 
     def list_voices(self) -> list[CachedVoice]:
-        response = request_with_retry(
-            lambda: self._client.get("/voices"),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        payload = response.json()
-        voices = payload.get("voices", payload if isinstance(payload, list) else [])
-        return [map_voice_response(voice) for voice in voices]
+        def _fetch() -> list[CachedVoice]:
+            response = self._client.voices.get_all()
+            return [map_voice_response(voice) for voice in response.voices]
+
+        return _call_with_retry(_fetch)
 
     def get_voice(self, voice_id: str) -> CachedVoice:
-        response = request_with_retry(
-            lambda: self._client.get(f"/voices/{voice_id}"),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        return map_voice_response(response.json())
+        def _fetch() -> CachedVoice:
+            return map_voice_response(self._client.voices.get(voice_id))
+
+        return _call_with_retry(_fetch)
 
     def synthesize(self, voice_id: str, request: TTSRequest) -> bytes:
-        params = {"output_format": request.output_format}
-        response = request_with_retry(
-            lambda: self._client.post(
-                f"/text-to-speech/{voice_id}",
-                params=params,
-                json=request.to_api_dict(),
-            ),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        return response.content
+        def _fetch() -> bytes:
+            chunks = self._client.text_to_speech.convert(
+                voice_id=voice_id,
+                text=request.text,
+                model_id=request.model_id,
+                output_format=request.output_format,  # type: ignore[arg-type]
+                voice_settings=_to_sdk_voice_settings(request.voice_settings),
+                language_code=request.language_code,
+                optimize_streaming_latency=request.optimize_streaming_latency,
+            )
+            return _collect_audio(chunks)
+
+        return _call_with_retry(_fetch)
 
     def _map_voice(self, data: dict[str, Any]) -> CachedVoice:
         return map_voice_response(data)
 
 
-def map_voice_response(data: dict[str, Any]) -> CachedVoice:
-    labels = data.get("labels") or {}
-    language = labels.get("language") or labels.get("accent")
-    return CachedVoice(
-        voice_id=data["voice_id"],
-        name=data.get("name", ""),
-        description=data.get("description"),
-        labels=labels,
-        category=data.get("category", "premade"),
-        preview_url=data.get("preview_url"),
-        language=language,
-        cached_at=datetime.now(timezone.utc),
-    )
-
-
 class AsyncElevenLabsClient:
-    BASE_URL = "https://api.elevenlabs.io/v1"
-
     def __init__(
         self,
         config: SmartTTSConfig,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: AsyncElevenLabs | None = None,
+        httpx_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._config = config
-        self._client = client or httpx.AsyncClient(
-            base_url=self.BASE_URL,
-            headers={"xi-api-key": config.elevenlabs_api_key},
-            timeout=60.0,
-        )
-        self._owns_client = client is None
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = AsyncElevenLabs(
+                api_key=config.elevenlabs_api_key,
+                httpx_client=httpx_client,
+                timeout=60.0,
+            )
+            self._owns_client = httpx_client is None
 
     async def aclose(self) -> None:
         if self._owns_client:
-            await self._client.aclose()
+            await self._client._client_wrapper.httpx_client.httpx_client.aclose()
 
     async def __aenter__(self) -> AsyncElevenLabsClient:
         return self
@@ -114,35 +212,30 @@ class AsyncElevenLabsClient:
         await self.aclose()
 
     async def list_voices(self) -> list[CachedVoice]:
-        response = await async_request_with_retry(
-            lambda: self._client.get("/voices"),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        payload = response.json()
-        voices = payload.get("voices", payload if isinstance(payload, list) else [])
-        return [map_voice_response(voice) for voice in voices]
+        async def _fetch() -> list[CachedVoice]:
+            response = await self._client.voices.get_all()
+            return [map_voice_response(voice) for voice in response.voices]
+
+        return await _await_with_retry(_fetch)
 
     async def get_voice(self, voice_id: str) -> CachedVoice:
-        response = await async_request_with_retry(
-            lambda: self._client.get(f"/voices/{voice_id}"),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        return map_voice_response(response.json())
+        async def _fetch() -> CachedVoice:
+            voice = await self._client.voices.get(voice_id)
+            return map_voice_response(voice)
+
+        return await _await_with_retry(_fetch)
 
     async def synthesize(self, voice_id: str, request: TTSRequest) -> bytes:
-        params = {"output_format": request.output_format}
-        response = await async_request_with_retry(
-            lambda: self._client.post(
-                f"/text-to-speech/{voice_id}",
-                params=params,
-                json=request.to_api_dict(),
-            ),
-            max_retries=3,
-        )
-        if response.status_code >= 400:
-            raise ElevenLabsAPIError(response.status_code, response.text)
-        return response.content
+        async def _fetch() -> bytes:
+            chunks = self._client.text_to_speech.convert(
+                voice_id=voice_id,
+                text=request.text,
+                model_id=request.model_id,
+                output_format=request.output_format,  # type: ignore[arg-type]
+                voice_settings=_to_sdk_voice_settings(request.voice_settings),
+                language_code=request.language_code,
+                optimize_streaming_latency=request.optimize_streaming_latency,
+            )
+            return await _collect_audio_async(chunks)
+
+        return await _await_with_retry(_fetch)

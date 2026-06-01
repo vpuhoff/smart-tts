@@ -28,7 +28,7 @@ def test_from_env_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     assert config.cache_dir == tmp_path / "cache"
 
 
-def test_from_env_missing_required(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_from_env_missing_required(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     for key in (
         "ELEVENLABS_API_KEY",
         "OPENROUTER_API_KEY",
@@ -36,12 +36,13 @@ def test_from_env_missing_required(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(key, raising=False)
 
+    missing_env = tmp_path / "missing.env"
     with pytest.raises(SmartTTSError, match="Missing required environment variables"):
-        SmartTTSConfig.from_env()
+        SmartTTSConfig.from_env(dotenv_path=missing_env)
 
     monkeypatch.setenv("ELEVENLABS_API_KEY", "el-key")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
     monkeypatch.delenv("OPENROUTER_API_TTS_PROMPT_MODEL", raising=False)
 
     with pytest.raises(SmartTTSError):
-        SmartTTSConfig.from_env()
+        SmartTTSConfig.from_env(dotenv_path=missing_env)

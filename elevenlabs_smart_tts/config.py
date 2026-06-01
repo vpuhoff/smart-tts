@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from elevenlabs_smart_tts.exceptions import SmartTTSError
 from elevenlabs_smart_tts.models import OutputFormat, TTSModel, VoiceSettings
 
+DEFAULT_VOICE_ID = "tnSpp4vdxKPjI9w0GnoV"
+
 
 @dataclass
 class SmartTTSConfig:
@@ -19,7 +21,7 @@ class SmartTTSConfig:
     default_model: TTSModel = TTSModel.ELEVEN_V3
     default_output_format: OutputFormat = OutputFormat.MP3_44100_128
     default_voice_settings: VoiceSettings = field(default_factory=VoiceSettings)
-    default_voice_id: str | None = None
+    default_voice_id: str | None = DEFAULT_VOICE_ID
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     cache_ttl_voices: int = 86400
     cache_ttl_enhanced_text: int = 3600
@@ -61,7 +63,10 @@ class SmartTTSConfig:
             "ELEVENLABS_DEFAULT_OUTPUT_FORMAT",
             OutputFormat.MP3_44100_128.value,
         )
-        default_voice_id = os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", "").strip() or None
+        default_voice_id = (
+            os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", DEFAULT_VOICE_ID).strip()
+            or DEFAULT_VOICE_ID
+        )
         openrouter_base_url = os.getenv(
             "OPENROUTER_BASE_URL",
             "https://openrouter.ai/api/v1",

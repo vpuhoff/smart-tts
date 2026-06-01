@@ -187,7 +187,7 @@ SynthesisTask(text="...", emotion="neutral")     # plain narration
 | `ELEVENLABS_CACHE_DIR` | `~/.cache/elevenlabs-smart-tts` | Local cache directory |
 | `ELEVENLABS_DEFAULT_MODEL` | `eleven_v3` | Default TTS model |
 | `ELEVENLABS_DEFAULT_OUTPUT_FORMAT` | `mp3_44100_128` | Audio output format |
-| `ELEVENLABS_DEFAULT_VOICE_ID` | — | Fallback voice when auto-selection fails |
+| `ELEVENLABS_DEFAULT_VOICE_ID` | `tnSpp4vdxKPjI9w0GnoV` | Fallback voice when auto-selection fails |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL |
 
 Programmatic configuration is also supported:
