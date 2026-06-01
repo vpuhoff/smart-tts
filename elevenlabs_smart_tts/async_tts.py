@@ -52,6 +52,9 @@ class AsyncSmartTTS:
         started = time.perf_counter()
         model = task.model or self._config.default_model
         voices = self._voice_manager.list_voices()
+        if not voices:
+            await self.sync_voices(force=True)
+            voices = self._voice_manager.list_voices()
         voice = self._voice_selector.select(task, voices)
         voice_settings = task.voice_settings or self._config.default_voice_settings
         enhanced_text = await self._text_enhancer.enhance(task, voice, model)

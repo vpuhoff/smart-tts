@@ -6,7 +6,7 @@ import respx
 
 from elevenlabs_smart_tts.client.elevenlabs import ElevenLabsClient
 from elevenlabs_smart_tts.client.openrouter import OpenRouterClient
-from elevenlabs_smart_tts.exceptions import ElevenLabsAPIError, OpenRouterAPIError
+from elevenlabs_smart_tts.exceptions import ElevenLabsAPIError, OpenRouterAPIError, VoiceNotFoundError
 from elevenlabs_smart_tts.models import TTSRequest, VoiceSettings
 
 
@@ -62,10 +62,33 @@ def test_elevenlabs_error_mapping(config) -> None:
     )
 
     with ElevenLabsClient(config) as client:
-        with pytest.raises(ElevenLabsAPIError) as exc:
-            client.get_voice("voice-x")
+        voice = client.get_voice("voice-x")
 
-    assert exc.value.status_code == 404
+    assert voice.voice_id == "voice-x"
+    assert voice.category == "shared"
+
+
+@respx.mock
+def test_elevenlabs_voice_not_found_body(config) -> None:
+    respx.get("https://api.elevenlabs.io/v1/voices/tnSpp4vdxKPjI9w0GnoV").mock(
+        return_value=httpx.Response(
+            400,
+            json={
+                "detail": {
+                    "type": "not_found",
+                    "code": "voice_not_found",
+                    "message": "A voice with ID 'tnSpp4vdxKPjI9w0GnoV' was not found.",
+                    "status": "voice_not_found",
+                }
+            },
+        )
+    )
+
+    with ElevenLabsClient(config) as client:
+        voice = client.get_voice("tnSpp4vdxKPjI9w0GnoV")
+
+    assert voice.voice_id == "tnSpp4vdxKPjI9w0GnoV"
+    assert voice.category == "shared"
 
 
 @respx.mock

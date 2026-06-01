@@ -46,6 +46,12 @@ class VoiceManager:
             voice_ids.append(voice.voice_id)
 
         self._cache.set_voice_ids(voice_ids, ttl=self._config.cache_ttl_voices)
+        if self._config.default_voice_id and self._config.default_voice_id not in voice_ids:
+            logger.info(
+                "default_voice_id is not in the synced voice library; "
+                "it can still be used for text-to-speech if the id is valid",
+                extra={"default_voice_id": self._config.default_voice_id},
+            )
         logger.info("voice_sync_complete", extra={"count": len(voice_ids)})
         return len(voice_ids)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from datetime import datetime, timezone
@@ -12,10 +13,12 @@ from elevenlabs.core.api_error import ApiError
 from elevenlabs.types import Voice, VoiceSettings as SdkVoiceSettings
 
 from elevenlabs_smart_tts.config import SmartTTSConfig
-from elevenlabs_smart_tts.exceptions import ElevenLabsAPIError
+from elevenlabs_smart_tts.exceptions import ElevenLabsAPIError, VoiceNotFoundError
 from elevenlabs_smart_tts.models import CachedVoice, TTSRequest, VoiceSettings
 
 T = TypeVar("T")
+
+logger = logging.getLogger(__name__)
 
 
 def map_voice_response(data: dict[str, Any] | Voice) -> CachedVoice:
@@ -68,6 +71,25 @@ def _raise_api_error(exc: ApiError) -> None:
     raise ElevenLabsAPIError(exc.status_code or 0, _api_error_detail(exc)) from exc
 
 
+def _is_voice_not_found(exc: ApiError) -> bool:
+    if exc.status_code not in {400, 404}:
+        return False
+    body = exc.body
+    if not isinstance(body, dict):
+        return exc.status_code == 404
+    detail = body.get("detail", body)
+    if not isinstance(detail, dict):
+        return exc.status_code == 404
+    return detail.get("code") == "voice_not_found" or detail.get("status") == "voice_not_found"
+
+
+def _raise_voice_not_found(exc: ApiError, *, voice_id: str | None = None) -> None:
+    suffix = f": {voice_id}" if voice_id else ""
+    raise VoiceNotFoundError(
+        f"Voice not found via ElevenLabs API{suffix} ({_api_error_detail(exc)})"
+    ) from exc
+
+
 def _is_retryable(exc: ApiError) -> bool:
     status_code = exc.status_code or 0
     return status_code == 429 or status_code >= 500
@@ -80,6 +102,8 @@ def _call_with_retry(fn: Callable[[], T], *, max_retries: int = 3) -> T:
             return fn()
         except ApiError as exc:
             last_error = exc
+            if _is_voice_not_found(exc):
+                _raise_voice_not_found(exc)
             if not _is_retryable(exc) or attempt >= max_retries:
                 _raise_api_error(exc)
             time.sleep(2**attempt)
@@ -99,6 +123,8 @@ async def _await_with_retry(
             return await fn()
         except ApiError as exc:
             last_error = exc
+            if _is_voice_not_found(exc):
+                _raise_voice_not_found(exc)
             if not _is_retryable(exc) or attempt >= max_retries:
                 _raise_api_error(exc)
             await asyncio.sleep(2**attempt)
@@ -160,7 +186,10 @@ class ElevenLabsClient:
         def _fetch() -> CachedVoice:
             return map_voice_response(self._client.voices.get(voice_id))
 
-        return _call_with_retry(_fetch)
+        try:
+            return _call_with_retry(_fetch)
+        except VoiceNotFoundError:
+            return self._voice_outside_library(voice_id)
 
     def synthesize(self, voice_id: str, request: TTSRequest) -> bytes:
         def _fetch() -> bytes:
@@ -179,6 +208,23 @@ class ElevenLabsClient:
 
     def _map_voice(self, data: dict[str, Any]) -> CachedVoice:
         return map_voice_response(data)
+
+    @staticmethod
+    def _voice_outside_library(voice_id: str) -> CachedVoice:
+        logger.warning(
+            "voice metadata unavailable from voices.get; voice may still work for text-to-speech",
+            extra={"voice_id": voice_id},
+        )
+        return CachedVoice(
+            voice_id=voice_id,
+            name=voice_id,
+            description=None,
+            labels={},
+            category="shared",
+            preview_url=None,
+            language=None,
+            cached_at=datetime.now(timezone.utc),
+        )
 
 
 class AsyncElevenLabsClient:
@@ -223,7 +269,10 @@ class AsyncElevenLabsClient:
             voice = await self._client.voices.get(voice_id)
             return map_voice_response(voice)
 
-        return await _await_with_retry(_fetch)
+        try:
+            return await _await_with_retry(_fetch)
+        except VoiceNotFoundError:
+            return ElevenLabsClient._voice_outside_library(voice_id)
 
     async def synthesize(self, voice_id: str, request: TTSRequest) -> bytes:
         async def _fetch() -> bytes:

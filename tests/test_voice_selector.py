@@ -45,11 +45,12 @@ def test_select_pvc_with_v3_raises(config, sample_voice_pvc) -> None:
         selector.select(task, [sample_voice_pvc])
 
 
-def test_select_missing_voice_raises(config, sample_voice) -> None:
+def test_select_explicit_voice_outside_library(config, sample_voice) -> None:
     selector = VoiceSelector(config)
-    task = SynthesisTask(text="Hello", voice_id="missing")
-    with pytest.raises(VoiceNotFoundError):
-        selector.select(task, [sample_voice])
+    task = SynthesisTask(text="Hello", voice_id="tnSpp4vdxKPjI9w0GnoV")
+    voice = selector.select(task, [sample_voice])
+    assert voice.voice_id == "tnSpp4vdxKPjI9w0GnoV"
+    assert voice.category == "shared"
 
 
 def test_select_random_fallback_when_no_match(config, sample_voice) -> None:
@@ -66,8 +67,9 @@ def test_select_random_fallback_when_no_match(config, sample_voice) -> None:
     assert voice.voice_id == sample_voice.voice_id
 
 
-def test_select_random_fallback_when_default_missing_from_cache(config, sample_voice) -> None:
+def test_select_default_voice_outside_library(config, sample_voice) -> None:
     selector = VoiceSelector(config)
     task = SynthesisTask(text="Hello", style="unknown-style")
     voice = selector.select(task, [sample_voice])
-    assert voice.voice_id == sample_voice.voice_id
+    assert voice.voice_id == "voice-default"
+    assert voice.category == "shared"

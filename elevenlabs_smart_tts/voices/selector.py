@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import random
+from datetime import datetime, timezone
 
 from elevenlabs_smart_tts.config import SmartTTSConfig
 from elevenlabs_smart_tts.exceptions import ModelVoiceIncompatibleError, VoiceCacheEmptyError, VoiceNotFoundError
@@ -15,19 +16,25 @@ class VoiceSelector:
         self._config = config
 
     def select(self, task: SynthesisTask, voices: list[CachedVoice]) -> CachedVoice:
-        if not voices:
-            raise VoiceCacheEmptyError("Voice cache is empty. Call sync_voices() first.")
-
         model = task.model or self._config.default_model
 
         if task.voice_id:
-            voice = self._find_by_id(task.voice_id, voices)
+            voice = self._resolve_explicit_voice(task, voices)
             self._validate_model_compatibility(voice, model)
             logger.info(
                 "voice_selected",
-                extra={"voice_id": voice.voice_id, "score": None, "reason": "explicit"},
+                extra={
+                    "voice_id": voice.voice_id,
+                    "score": None,
+                    "reason": "explicit_outside_library"
+                    if voice.category == "shared"
+                    else "explicit",
+                },
             )
             return voice
+
+        if not voices:
+            raise VoiceCacheEmptyError("Voice cache is empty. Call sync_voices() first.")
 
         if task.voice_description:
             matches = self._score_voices(task, voices, description=task.voice_description)
@@ -54,21 +61,21 @@ class VoiceSelector:
             try:
                 voice = self._find_by_id(self._config.default_voice_id, voices)
             except VoiceNotFoundError:
+                voice = self._explicit_voice(task, self._config.default_voice_id)
                 logger.warning(
-                    "default_voice_id missing from cache, using random fallback",
+                    "default_voice_id not in voice library cache; using id for TTS anyway",
                     extra={"default_voice_id": self._config.default_voice_id},
                 )
-            else:
-                self._validate_model_compatibility(voice, model)
-                logger.info(
-                    "voice_selected",
-                    extra={
-                        "voice_id": voice.voice_id,
-                        "score": None,
-                        "reason": "default_voice_id",
-                    },
-                )
-                return voice
+            self._validate_model_compatibility(voice, model)
+            logger.info(
+                "voice_selected",
+                extra={
+                    "voice_id": voice.voice_id,
+                    "score": None,
+                    "reason": "default_voice_id",
+                },
+            )
+            return voice
 
         return self._pick_random_voice(voices, model)
 
@@ -77,6 +84,32 @@ class VoiceSelector:
             if voice.voice_id == voice_id:
                 return voice
         raise VoiceNotFoundError(f"Voice not found: {voice_id}")
+
+    def _resolve_explicit_voice(self, task: SynthesisTask, voices: list[CachedVoice]) -> CachedVoice:
+        assert task.voice_id is not None
+        try:
+            return self._find_by_id(task.voice_id, voices)
+        except VoiceNotFoundError:
+            logger.warning(
+                "voice_id not listed in account library; it may still work for text-to-speech",
+                extra={"voice_id": task.voice_id},
+            )
+            return self._explicit_voice(task)
+
+    @staticmethod
+    def _explicit_voice(task: SynthesisTask, voice_id: str | None = None) -> CachedVoice:
+        resolved_id = voice_id or task.voice_id
+        assert resolved_id is not None
+        return CachedVoice(
+            voice_id=resolved_id,
+            name=resolved_id,
+            description=task.voice_description,
+            labels={},
+            category="shared",
+            preview_url=None,
+            language=task.language,
+            cached_at=datetime.now(timezone.utc),
+        )
 
     def _score_voices(
         self,

@@ -11,6 +11,7 @@ task = SynthesisTask(
     style="professional",
     emotion="warm",
     use_case="conversational",
+    voice_id="tnSpp4vdxKPjI9w0GnoV",
     voice_description="warm conversational professional",
 )
 
