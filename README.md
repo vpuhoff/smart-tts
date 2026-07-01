@@ -1,35 +1,41 @@
-# elevenlabs-smart-tts
+# smart-tts
 
-High-level Python library for expressive text-to-speech with [ElevenLabs](https://elevenlabs.io) and LLM-powered text enhancement via [OpenRouter](https://openrouter.ai).
+High-level Python library for expressive speech production: [Fish Audio](https://fish.audio) TTS, [ElevenLabs](https://elevenlabs.io) music and ambient beds, and ffmpeg layer mixing.
 
-Pass raw text plus task context (language, style, emotion, use case) — the library picks a voice, enriches the text with Eleven v3 audio tags, and returns synthesized audio.
+Pass raw text (optionally with SSML `<break>` tags) — the library converts pauses to Fish Audio paralanguage, synthesizes speech in one continuous pass, and can mix music and ambient underneath.
 
 ## Features
 
 - **SmartTTS facade** — one pipeline from text to audio
-- **Voice caching** — local `diskcache` catalog with offline `list_voices()` / `get_voice()`
-- **Automatic voice selection** — by `voice_id`, description, use case, style, and language
-- **LLM text enhancement** — audio tags, punctuation, and normalization via OpenRouter
-- **Eleven v3 first** — expressive tags like `[whispers]`, `[excited]`, `[short pause]`
-- **Typed errors & retries** — resilient HTTP clients for ElevenLabs and OpenRouter
+- **Fish Audio speech** — single-pass synthesis via `s2.1-pro` (fallback to `s2.1-pro-free` on 402)
+- **SSML breaks → Fish S2 tags** — `<break time="1.2s"/>` becomes `[long pause]`
+- **ElevenLabs beds** — optional music (`music.compose`) and ambient (`text_to_sound_effects`)
+- **ffmpeg mixing** — speech + music + ambient with volume weights
+- **Sync & async API** — `SmartTTS` / `AsyncSmartTTS` with the same signatures
+- **Voice registry** — local `diskcache` for registered Fish `reference_id` voices
+
+## Requirements
+
+- Python 3.11+
+- `ffmpeg` and `ffprobe` in `PATH` (only when mixing layers)
 
 ## Installation
 
 ```bash
-pip install elevenlabs-smart-tts
+pip install smart-tts
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/vpuhoff/elevenlabs-smart-tts.git
-cd elevenlabs-smart-tts
+git clone https://github.com/vpuhoff/smart-tts.git
+cd smart-tts
 uv sync --dev
 ```
 
 ## Quick start
 
-1. Copy `.env.example` to `.env` and fill in your API keys:
+1. Copy `.env.example` to `.env` and set your API keys:
 
 ```bash
 cp .env.example .env
@@ -40,19 +46,19 @@ cp .env.example .env
 ```python
 from pathlib import Path
 
-from elevenlabs_smart_tts import SmartTTS, SynthesisTask
+from smart_tts import SmartTTS, SynthesisTask, VoiceSettings
 
 tts = SmartTTS.from_env()
 tts.sync_voices()
 
 result = tts.synthesize_to_file(
     SynthesisTask(
-        text="Welcome to our customer support service.",
-        language="en",
-        style="professional",
-        emotion="warm",
-        use_case="conversational",
-        voice_description="warm professional conversational",
+        text='Центр, <break time="1.2s" /> на связи резидентура.',
+        language="ru",
+        style="serious",
+        emotion="serious",
+        voice_id="67d37d81cb7340b391e9461d6671de03",
+        voice_settings=VoiceSettings(temperature=0.7, speed=1.0),
     ),
     Path("output.mp3"),
 )
@@ -60,146 +66,129 @@ result = tts.synthesize_to_file(
 print(result.enhanced_text)
 ```
 
-See [`example.py`](example.py) for a full runnable example.
+See [`example.py`](example.py) for a full demo: detective radio report with speech variants, custom music, and remix.
+
+```bash
+uv run python example.py
+uv run python example.py --variants 2
+uv run python example.py --remix-only --music back.mp3
+```
+
+## Synthesis with music and ambient
+
+Pass bed prompts or file paths in `SynthesisTask` — `synthesize()` generates speech, then mixes layers automatically:
+
+```python
+result = tts.synthesize(
+    SynthesisTask(
+        text="...",
+        voice_id="your-fish-reference-id",
+        music_prompt="Melancholic noir piano, instrumental, no vocals",
+        ambient_prompt="Subtle radio hum, tape hiss, seamless loop",
+        music_volume=0.32,
+        ambient_volume=0.18,
+        bed_weight=0.68,
+    )
+)
+```
+
+Or provide pre-recorded files:
+
+```python
+SynthesisTask(
+    text="...",
+    music_path="back.mp3",
+    ambient_path="ambient.wav",
+)
+```
+
+`ELEVENLABS_API_KEY` is required for API-generated beds. Custom files work without it.
 
 ## Task parameters
 
-`SynthesisTask` accepts free-text hints that guide **voice selection** and **LLM text enhancement**. After `sync_voices()`, inspect your cached catalog:
+### Core fields
+
+| Field | Description |
+|-------|-------------|
+| `text` | Source script; SSML `<break time="Xs"/>` converted to Fish pauses when `enhance_text=True` |
+| `voice_id` | Fish Audio `reference_id` |
+| `language` | Language hint (metadata / emotion mapping) |
+| `style`, `emotion`, `use_case` | Context hints; `emotion` adds Fish paralanguage prefix |
+| `enhance_text` | `True` — break conversion + emotion prefix; `False` — raw text |
+| `voice_settings` | `temperature`, `speed`, `top_p`, `repetition_penalty` for Fish API |
+| `model` | Fish model (see table below) |
+
+### Mixing fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `music_prompt` | — | ElevenLabs Music API prompt |
+| `ambient_prompt` | — | ElevenLabs Sound Effects API prompt |
+| `music_path` | — | Pre-recorded music file |
+| `ambient_path` | — | Pre-recorded ambient file |
+| `music_volume` | `0.32` | Music level in mix |
+| `ambient_volume` | `0.18` | Ambient level in mix |
+| `speech_volume` | `1.0` | Speech gain in mix (`1.0` = unchanged) |
+| `bed_weight` | `0.68` | Background bed weight vs speech |
+
+### SSML breaks
 
 ```python
-for voice in tts.list_voices():
-    print(voice.name, voice.labels.get("use_case"), voice.description)
+# Input
+'Срочное донесение. <break time="1.2s" /> Обнаружена цель.'
+
+# After enhance_text (Fish S2 [bracket] tags)
+'Срочное донесение. [long pause] Обнаружена цель.'
 ```
 
-The examples below come from the ElevenLabs premade voice catalog.
+| Pause | Fish markup |
+|-------|-------------|
+| ≥ 1.2 s | `[long pause]` |
+| ≥ 0.75 s | `[pause]` |
+| ≥ 0.4 s | `...` |
 
-### `use_case`
+### Emotion tags
 
-Used for voice matching against the ElevenLabs voice label `labels.use_case` (exact match scores highest).
+Fish Audio S2/S2.1 interprets `[bracket]` tags as delivery hints (not spoken text). Parenthesis prose like `(soft tone)` is **not** supported and may be read aloud.
 
-| Value | Typical voices |
-|-------|----------------|
-| `conversational` | Casual, agentic, podcast-style voices (e.g. Roger, Eric, Juniper) |
-| `informative_educational` | Clear educators, broadcasters (e.g. Alice, Matilda, Daniel) |
-| `narrative_story` | Storytellers, audiobook voices (e.g. George, Daria Reels) |
-| `advertisement` | Promo and ad reads (e.g. Bill) |
-| `social_media` | Short-form, trendy content |
-| `characters_animation` | Character and animation voices |
-| `entertainment_tv` | TV and entertainment narration |
-
-`customer_support` is **not** an ElevenLabs label — it still helps the LLM, but for voice selection prefer `conversational` or pass `voice_description="professional support warm"`.
-
-```python
-# Support-style call center message
-SynthesisTask(
-    text="Thanks for calling. How can I help you today?",
-    language="en",
-    use_case="conversational",
-    style="professional",
-    emotion="warm",
-    voice_description="trustworthy professional",
-)
-
-# Audiobook / long-form narration
-SynthesisTask(
-    text="Chapter one. It was a dark and stormy night.",
-    use_case="narrative_story",
-    style="warm",
-    emotion="calm",
-)
-
-# E-learning explainer
-SynthesisTask(
-    text="Today we'll learn how photosynthesis works.",
-    use_case="informative_educational",
-    style="professional",
-    emotion="neutral",
-)
-```
-
-### `style`
-
-Free-form delivery hint. Affects the **LLM enhancement prompt** and weak voice matching against voice name, description, and custom tags.
-
-Common values that match premade voice descriptions:
-
-| Value | Effect |
-|-------|--------|
-| `professional` | Formal, clear delivery |
-| `casual` / `conversational` | Relaxed, everyday tone |
-| `warm` | Friendly, inviting tone |
-| `neutral` | Balanced, informative |
-| `dramatic` | Strong emphasis, expressive pacing |
-| `playful` | Light, energetic tone |
-| `sympathetic` | Soft, empathetic delivery |
-
-```python
-SynthesisTask(text="...", style="professional")   # business / IVR
-SynthesisTask(text="...", style="casual")         # laid-back chat
-SynthesisTask(text="...", style="dramatic")       # emotional scene
-```
-
-### `emotion`
-
-Free-form mood hint for **LLM text enhancement only** (drives audio tags like `[excited]`, `[whispers]`, `[sighs]`). Does not filter voices.
-
-| Value | Typical audio tag behavior |
-|-------|----------------------------|
-| `warm` | Friendly, reassuring tone |
-| `calm` | Steady, subdued delivery |
-| `excited` | Higher energy, `[excited]` tags |
-| `sympathetic` | Soft, caring tone |
-| `curious` | Questioning, engaged tone |
-| `appalled` / `sarcastic` | Strong expressive tags |
-| `neutral` | Minimal emotional markup |
-
-```python
-SynthesisTask(text="...", emotion="warm")         # customer greeting
-SynthesisTask(text="...", emotion="excited")      # product launch
-SynthesisTask(text="...", emotion="sympathetic")  # apology or support
-SynthesisTask(text="...", emotion="neutral")     # plain narration
-```
-
-### Combining parameters
-
-| Scenario | Example values |
-|----------|----------------|
-| Customer support (EN) | `use_case="conversational"`, `style="professional"`, `emotion="warm"` |
-| News / podcast intro | `use_case="informative_educational"`, `style="neutral"`, `emotion="calm"` |
-| Audiobook chapter | `use_case="narrative_story"`, `style="warm"`, `emotion="calm"` |
-| Social reel | `use_case="social_media"`, `style="playful"`, `emotion="excited"` |
-| Ad read | `use_case="advertisement"`, `style="confident"`, `emotion="excited"` |
+| `emotion` | Tag added |
+|-----------|-----------|
+| `warm` | `[warm]` |
+| `serious` | `[serious]` |
+| `excited` | `[excited]` |
+| `sad` | `[sad]` |
+| `whisper` | `[whisper]` |
+| `calm` | `[calm]` |
 
 ## Configuration
 
-### Required environment variables
+### Required
 
 | Variable | Description |
 |----------|-------------|
-| `ELEVENLABS_API_KEY` | ElevenLabs API key |
-| `OPENROUTER_API_KEY` | OpenRouter API key |
-| `OPENROUTER_API_TTS_PROMPT_MODEL` | LLM for text enhancement (e.g. `anthropic/claude-3.5-sonnet`) |
+| `FISH_API_KEY` | Fish Audio API key |
 
-### Optional environment variables
+### Optional
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ELEVENLABS_CACHE_DIR` | `~/.cache/elevenlabs-smart-tts` | Local cache directory |
-| `ELEVENLABS_DEFAULT_MODEL` | `eleven_v3` | Default TTS model |
-| `ELEVENLABS_DEFAULT_OUTPUT_FORMAT` | `mp3_44100_128` | Audio output format |
-| `ELEVENLABS_DEFAULT_VOICE_ID` | `tnSpp4vdxKPjI9w0GnoV` | Fallback voice for TTS (may work even if absent from `sync_voices`) |
-| `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | OpenRouter API base URL |
+| `ELEVENLABS_API_KEY` | — | For music/ambient generation |
+| `FISH_DEFAULT_MODEL` | `s2.1-pro` | Fish model (`s2.1-pro-free` if no paid credits) |
+| `FISH_DEFAULT_VOICE_ID` | Kanevsky ref id | Fallback `reference_id` |
+| `FISH_API_URL` | `https://api.fish.audio/v1/tts` | Fish TTS endpoint |
+| `ELEVENLABS_CACHE_DIR` | `~/.cache/smart-tts` | Voice registry cache |
+| `ELEVENLABS_DEFAULT_OUTPUT_FORMAT` | `mp3_44100_128` | Output format |
 
-Programmatic configuration is also supported:
+Programmatic configuration:
 
 ```python
-from elevenlabs_smart_tts import SmartTTS, SmartTTSConfig, TTSModel
+from smart_tts import SmartTTS, SmartTTSConfig, TTSModel
 
 config = SmartTTSConfig(
-    elevenlabs_api_key="...",
-    openrouter_api_key="...",
-    openrouter_tts_prompt_model="anthropic/claude-3.5-sonnet",
+    fish_api_key="...",
+    elevenlabs_api_key="...",  # optional
     default_model=TTSModel.ELEVEN_V3,
+    default_voice_id="67d37d81cb7340b391e9461d6671de03",
 )
 tts = SmartTTS(config)
 ```
@@ -209,33 +198,80 @@ tts = SmartTTS(config)
 ### Synthesis pipeline
 
 ```python
-from elevenlabs_smart_tts import SmartTTS, SynthesisTask, TTSModel
+from smart_tts import SmartTTS, SynthesisTask, TTSModel, VoiceSettings
 
-tts = SmartTTS.from_env()
-tts.sync_voices()
-
-result = tts.synthesize(
-    SynthesisTask(
-        text="Are you serious? I can't believe you did that!",
-        voice_id="your-voice-id",
-        model=TTSModel.ELEVEN_V3,
-        style="dramatic",
-        emotion="appalled",
+with SmartTTS.from_env() as tts:
+    tts.sync_voices()
+    result = tts.synthesize(
+        SynthesisTask(
+            text="Срочное донесение.",
+            voice_id="67d37d81cb7340b391e9461d6671de03",
+            model=TTSModel.ELEVEN_V3,
+            emotion="serious",
+            voice_settings=VoiceSettings(temperature=0.7),
+        )
     )
-)
-
-audio_bytes = result.audio
-enhanced_text = result.enhanced_text
+    audio_bytes = result.audio
+    prepared_text = result.enhanced_text
 ```
 
-### Preview enhanced text without TTS
+### Generation templates
+
+Use `GenerationTemplate` to bundle speech, background, and mix settings. Pass only the script text at synthesis time:
 
 ```python
-enhanced = tts.enhance_text_only(
+from pathlib import Path
+
+from smart_tts import INVESTIGATION, GenerationTemplate, SmartTTS, synthesize_with_template
+
+# Built-in preset
+with SmartTTS.from_env() as tts:
+    speech = tts.synthesize_text(
+        'Срочное донесение. <break time="1.2s" /> Обнаружена цель.',
+        INVESTIGATION,
+        mix=False,  # speech only
+    )
+    tts.synthesize_text_to_file(
+        "Конец связи.",
+        INVESTIGATION,
+        Path("output/speech.mp3"),
+        mix=False,
+    )
+    tts.remix_file(
+        Path("output/speech.mp3"),
+        Path("output/final.mp3"),
+        INVESTIGATION,
+    )
+
+# Custom template or overrides
+template = INVESTIGATION.with_overrides(
+    speech_volume=1.2,
+    music_path="back.mp3",
+    ambient_path=None,
+)
+result = synthesize_with_template("Привет!", template, mix=True)
+
+# Load/save JSON recipes (see templates/investigation.json)
+template = GenerationTemplate.from_json_file("templates/investigation.json")
+```
+
+| Method | Description |
+|--------|-------------|
+| `template.to_task(text, mix=True, **overrides)` | Build `SynthesisTask` |
+| `template.with_overrides(**kwargs)` | Copy with changed fields |
+| `GenerationTemplate.from_dict()` / `from_json_file()` | Deserialize |
+| `template.save_json(path)` | Serialize to JSON |
+| `get_template("investigation")` | Built-in preset lookup |
+| `tts.synthesize_text(text, template)` | Synthesize with template |
+| `tts.remix_file(speech, output, template)` | Mix speech + beds |
+
+### Preview prepared text without TTS
+
+```python
+prepared = tts.enhance_text_only(
     SynthesisTask(
-        text="Thanks for calling. How can I help?",
-        language="en",
-        style="sympathetic",
+        text='Центр, <break time="1.2s" /> на связи.',
+        emotion="warm",
     )
 )
 ```
@@ -243,11 +279,11 @@ enhanced = tts.enhance_text_only(
 ### One-liner
 
 ```python
-from elevenlabs_smart_tts import synthesize
+from smart_tts import synthesize
 
 result = synthesize(
-    "Hello world",
-    language="en",
+    "Привет, мир!",
+    language="ru",
     style="neutral",
 )
 ```
@@ -258,39 +294,54 @@ result = synthesize(
 import asyncio
 from pathlib import Path
 
-from elevenlabs_smart_tts import AsyncSmartTTS, SynthesisTask, asynthesize
+from smart_tts import AsyncSmartTTS, SynthesisTask, asynthesize
 
 async def main() -> None:
     async with AsyncSmartTTS.from_env() as tts:
-        await tts.sync_voices()
         result = await tts.synthesize_to_file(
-            SynthesisTask(text="Hello world", language="en"),
+            SynthesisTask(text="Привет!", language="ru"),
             Path("output.mp3"),
         )
         print(result.enhanced_text)
 
 asyncio.run(main())
-
-# Or as a one-liner:
-result = asyncio.run(asynthesize("Hello world", language="en"))
 ```
 
-### Voice management
+### Voice registry
 
 ```python
-voices = tts.list_voices(language="en", tags=["narration"])
-voice = tts.get_voice("voice-id")
-
-tts.sync_voices(force=True)  # refresh cache from ElevenLabs API
+voices = tts.list_voices()
+voice = tts.get_voice("reference-id")
+tts.sync_voices(force=True)  # refresh default voice in cache
 ```
 
-## Supported TTS models
+Fish voices are referenced by `reference_id` from the Fish Audio console. Register custom voices via `VoiceRegistry.register_voice()` or set `FISH_DEFAULT_VOICE_ID`.
 
-| Model | Best for |
-|-------|----------|
-| `eleven_v3` | Expressive speech, audio tags, emotions |
-| `eleven_multilingual_v2` | Multilingual, high voice similarity |
-| `eleven_flash_v2_5` | Low latency, conversational agents |
+## Models (`TTSModel`)
+
+Legacy enum names map to Fish Audio models:
+
+| Enum | Fish model | Notes |
+|------|------------|-------|
+| `TTSModel.ELEVEN_V3` | `s2.1-pro` | Default; auto-fallback to `s2.1-pro-free` on 402 |
+| `TTSModel.ELEVEN_MULTILINGUAL_V2` | `s2-pro` | |
+| `TTSModel.ELEVEN_FLASH_V2_5` | `s1` | |
+
+## Package layout
+
+```
+smart_tts/
+├── tts.py, async_tts.py     # SmartTTS facade
+├── templates.py             # GenerationTemplate presets
+├── config.py, models.py
+├── client/
+│   ├── fish.py              # Fish Audio TTS
+│   └── elevenlabs.py        # Music + ambient beds
+├── script/breaks.py         # SSML → Fish paralanguage
+├── audio/mixer.py           # ffmpeg mix_tracks
+├── text.py                  # prepare_text()
+└── voices/registry.py       # diskcache voice registry
+```
 
 ## Development
 
@@ -306,6 +357,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Links
 
-- [GitHub repository](https://github.com/vpuhoff/elevenlabs-smart-tts)
-- [PyPI package](https://pypi.org/project/elevenlabs-smart-tts/)
+- [GitHub repository](https://github.com/vpuhoff/smart-tts)
+- [PyPI package](https://pypi.org/project/smart-tts/)
 - [Design specification (Russian)](spec.md)

@@ -3,13 +3,27 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 
 class TTSModel(str, Enum):
-    ELEVEN_V3 = "eleven_v3"
-    ELEVEN_MULTILINGUAL_V2 = "eleven_multilingual_v2"
-    ELEVEN_FLASH_V2_5 = "eleven_flash_v2_5"
+    """Fish Audio model identifiers (legacy enum names kept for API compatibility)."""
+
+    ELEVEN_V3 = "s2.1-pro"
+    S2_1_PRO_FREE = "s2.1-pro-free"
+    ELEVEN_MULTILINGUAL_V2 = "s2-pro"
+    ELEVEN_FLASH_V2_5 = "s1"
+
+    @property
+    def fish_model(self) -> str:
+        return self.value
+
+    @property
+    def fallback_model(self) -> str | None:
+        if self == TTSModel.ELEVEN_V3:
+            return TTSModel.S2_1_PRO_FREE.value
+        return None
 
 
 class OutputFormat(str, Enum):
@@ -28,15 +42,9 @@ class VoiceSettings:
     style: float = 0.0
     speed: float = 1.0
     use_speaker_boost: bool = True
-
-    def to_api_dict(self) -> dict[str, Any]:
-        return {
-            "stability": self.stability,
-            "similarity_boost": self.similarity_boost,
-            "style": self.style,
-            "speed": self.speed,
-            "use_speaker_boost": self.use_speaker_boost,
-        }
+    temperature: float = 0.7
+    top_p: float = 0.7
+    repetition_penalty: float = 1.2
 
 
 @dataclass
@@ -91,6 +99,14 @@ class SynthesisTask:
     voice_settings: VoiceSettings | None = None
     output_format: OutputFormat | None = None
     language_override: bool = False
+    music_prompt: str | None = None
+    ambient_prompt: str | None = None
+    music_path: Path | str | None = None
+    ambient_path: Path | str | None = None
+    music_volume: float = 0.32
+    ambient_volume: float = 0.18
+    speech_volume: float = 1.0
+    bed_weight: float = 0.68
 
 
 @dataclass
@@ -105,28 +121,6 @@ class SynthesisResult:
     metadata: dict[str, Any]
 
 
-@dataclass
-class TTSRequest:
-    text: str
-    model_id: str
-    voice_settings: VoiceSettings
-    language_code: str | None = None
-    output_format: str = "mp3_44100_128"
-    optimize_streaming_latency: int | None = None
-
-    def to_api_dict(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {
-            "text": self.text,
-            "model_id": self.model_id,
-            "voice_settings": self.voice_settings.to_api_dict(),
-        }
-        if self.language_code is not None:
-            payload["language_code"] = self.language_code
-        if self.optimize_streaming_latency is not None:
-            payload["optimize_streaming_latency"] = self.optimize_streaming_latency
-        return payload
-
-
 CONTENT_TYPE_BY_FORMAT: dict[str, str] = {
     OutputFormat.MP3_44100_128.value: "audio/mpeg",
     OutputFormat.MP3_44100_192.value: "audio/mpeg",
@@ -134,4 +128,9 @@ CONTENT_TYPE_BY_FORMAT: dict[str, str] = {
     OutputFormat.PCM_22050.value: "audio/pcm",
     OutputFormat.PCM_24000.value: "audio/pcm",
     OutputFormat.PCM_44100.value: "audio/pcm",
+}
+
+FISH_MP3_BITRATE_BY_FORMAT: dict[str, int] = {
+    OutputFormat.MP3_44100_128.value: 128,
+    OutputFormat.MP3_44100_192.value: 192,
 }
