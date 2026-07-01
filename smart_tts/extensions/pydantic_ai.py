@@ -37,9 +37,10 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -54,13 +55,20 @@ except ImportError as exc:  # pragma: no cover - optional dependency
 from smart_tts.async_tts import AsyncSmartTTS
 from smart_tts.audio.probe import audio_duration_seconds
 from smart_tts.config import SmartTTSConfig
-from smart_tts.templates import BUILTIN_TEMPLATES, GenerationTemplate, get_template
+from smart_tts.templates import (
+    GenerationTemplate,
+    TemplateRegistry,
+    TemplateRegistryInfo,
+    default_template_registry,
+    resolve_template,
+)
 from smart_tts.telemetry import async_span
 from smart_tts.text import prepare_text
 
 __all__ = [
     "BuiltinTemplateName",
     "EmotionTag",
+    "HasSmartTTS",
     "PreviewSpeechTextRequest",
     "PreviewSpeechTextResult",
     "SmartTTSDeps",
@@ -69,15 +77,32 @@ __all__ = [
     "SynthesizeSpeechResult",
     "TemplateInfo",
     "create_smart_tts_toolset",
+    "list_generation_templates",
     "require_openrouter_api_key",
     "resolve_openrouter_model",
+    "run_preview_speech_text",
     "run_synthesize_speech",
 ]
 
 DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+DEFAULT_TOOLSET_INSTRUCTIONS = (
+    "Use these tools to synthesize Russian speech with Fish Audio. "
+    "Prefer template 'investigation' for noir detective narration. "
+    "Omit mix to use each template's default; set mix=false for speech-only output."
+)
 
 BuiltinTemplateName = Literal["investigation", "default"]
 EmotionTag = Literal["warm", "serious", "excited", "sad", "whisper", "calm"]
+
+
+class HasSmartTTS(Protocol):
+    """Structural protocol for agent deps with smart-tts runtime."""
+
+    @property
+    def tts(self) -> AsyncSmartTTS: ...
+
+    @property
+    def tts_output_dir(self) -> Path: ...
 
 
 @dataclass
@@ -86,6 +111,11 @@ class SmartTTSDeps:
 
     tts: AsyncSmartTTS
     output_dir: Path = field(default_factory=lambda: Path("output"))
+    on_synthesized: Callable[["SynthesizeSpeechResult"], Awaitable[Any]] | None = None
+
+    @property
+    def tts_output_dir(self) -> Path:
+        return self.output_dir
 
     @classmethod
     def from_env(
@@ -155,9 +185,12 @@ class SynthesizeSpeechRequest(BaseModel):
             "or path to a JSON template file."
         ),
     )
-    mix: bool = Field(
-        default=True,
-        description="Whether to mix speech with music/ambient beds from the template.",
+    mix: bool | None = Field(
+        default=None,
+        description=(
+            "Whether to mix speech with music/ambient beds. "
+            "When omitted, uses the template mix_default."
+        ),
     )
     emotion: EmotionTag | None = Field(
         default=None,
@@ -228,17 +261,33 @@ class SynthesizeSpeechResult(BaseModel):
     mixed: bool = Field(
         description="Whether the output includes mixed music/ambient beds.",
     )
+    template_name: str = Field(
+        description="Resolved generation template name used for synthesis.",
+        min_length=1,
+    )
     metadata: SynthesisMetadata = Field(
         description="Technical synthesis metadata from the smart-tts pipeline.",
     )
 
 
 class TemplateInfo(BaseModel):
-    """Summary of a built-in generation template."""
+    """Summary of a generation template."""
 
     name: str = Field(
         description="Template identifier passed to synthesize_speech.",
         min_length=1,
+    )
+    slug: str | None = Field(
+        default=None,
+        description="Template slug alias; defaults to name when omitted.",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Human-readable template description for admins and LLM selection.",
+    )
+    mix_default: bool = Field(
+        default=False,
+        description="Default mix flag when synthesize_speech omits mix.",
     )
     language: str | None = Field(
         default=None,
@@ -293,43 +342,87 @@ class PreviewSpeechTextResult(BaseModel):
     )
 
 
-def _resolve_template(name_or_path: str) -> GenerationTemplate:
-    path = Path(name_or_path)
-    if path.suffix == ".json" and path.exists():
-        return GenerationTemplate.from_json_file(path)
-    return get_template(name_or_path)
+def _template_info_from_registry(entry: TemplateRegistryInfo) -> TemplateInfo:
+    template = entry.template
+    return TemplateInfo(
+        name=entry.name,
+        slug=entry.name,
+        description=entry.description,
+        mix_default=template.mix_default,
+        language=template.language,
+        emotion=template.emotion,
+        has_music=bool(template.music_prompt or template.music_path),
+        has_ambient=bool(template.ambient_prompt or template.ambient_path),
+    )
 
 
-def _output_path(deps: SmartTTSDeps, template_name: str, filename: str | None) -> Path:
-    deps.output_dir.mkdir(parents=True, exist_ok=True)
+def _resolve_mix(
+    request_mix: bool | None,
+    template: GenerationTemplate,
+    factory_default_mix: bool | None,
+) -> bool:
+    if request_mix is not None:
+        return request_mix
+    if factory_default_mix is not None:
+        return factory_default_mix
+    return template.mix_default
+
+
+def _output_path(deps: HasSmartTTS, template_name: str, filename: str | None) -> Path:
+    deps.tts_output_dir.mkdir(parents=True, exist_ok=True)
     if filename:
         name = filename if filename.endswith(".mp3") else f"{filename}.mp3"
-        return deps.output_dir / name
+        return deps.tts_output_dir / name
     slug = re.sub(r"[^\w\-]+", "_", template_name).strip("_") or "speech"
-    return deps.output_dir / f"{slug}_{int(time.time())}.mp3"
+    return deps.tts_output_dir / f"{slug}_{int(time.time())}.mp3"
+
+
+def list_generation_templates_from_registry(
+    registry: TemplateRegistry | None = None,
+) -> list[TemplateInfo]:
+    """List generation templates from *registry* (built-in chain by default)."""
+    active = registry or default_template_registry()
+    return [_template_info_from_registry(entry) for entry in active.list_info()]
+
+
+def list_generation_templates(
+    registry: TemplateRegistry | None = None,
+) -> list[TemplateInfo]:
+    """Alias for :func:`list_generation_templates_from_registry`."""
+    return list_generation_templates_from_registry(registry)
 
 
 async def run_synthesize_speech(
-    deps: SmartTTSDeps,
+    deps: HasSmartTTS,
     request: SynthesizeSpeechRequest,
+    *,
+    template: GenerationTemplate | None = None,
+    registry: TemplateRegistry | None = None,
+    default_mix: bool | None = None,
 ) -> SynthesizeSpeechResult:
+    resolved = (
+        template
+        if template is not None
+        else resolve_template(request.template, registry)
+    )
+    mix = _resolve_mix(request.mix, resolved, default_mix)
+
     async with async_span(
         "smart_tts.tool.synthesize_speech",
-        template=request.template,
-        mix=request.mix,
+        template=resolved.name,
+        mix=mix,
         char_count=len(request.text),
     ):
-        template = _resolve_template(request.template)
         overrides: dict[str, Any] = {}
         if request.emotion is not None:
             overrides["emotion"] = request.emotion
 
-        output_path = _output_path(deps, template.name, request.output_filename)
+        output_path = _output_path(deps, resolved.name, request.output_filename)
         result = await deps.tts.synthesize_text_to_file(
             request.text,
-            template,
+            resolved,
             output_path,
-            mix=request.mix,
+            mix=mix,
             **overrides,
         )
         duration_ms = result.metadata.get("duration_ms")
@@ -338,68 +431,90 @@ async def run_synthesize_speech(
         else:
             duration = audio_duration_seconds(output_path)
 
-        return SynthesizeSpeechResult(
+        speech_result = SynthesizeSpeechResult(
             path=str(output_path.resolve()),
             duration_seconds=duration,
             enhanced_text=result.enhanced_text,
             model=result.model.value,
             voice_id=result.voice.voice_id,
             mixed=bool(result.metadata.get("mixed")),
+            template_name=resolved.name,
             metadata=SynthesisMetadata.model_validate(result.metadata),
         )
 
+        callback = getattr(deps, "on_synthesized", None)
+        if callback is not None:
+            await callback(speech_result)
 
-def create_smart_tts_toolset() -> FunctionToolset[SmartTTSDeps]:
+        return speech_result
+
+
+async def run_preview_speech_text(
+    request: PreviewSpeechTextRequest,
+    *,
+    template: GenerationTemplate | None = None,
+    registry: TemplateRegistry | None = None,
+) -> PreviewSpeechTextResult:
+    resolved = (
+        template
+        if template is not None
+        else resolve_template(request.template, registry)
+    )
+    overrides: dict[str, Any] = {}
+    if request.emotion is not None:
+        overrides["emotion"] = request.emotion
+    task = resolved.to_task(request.text, mix=False, **overrides)
+    prepared = prepare_text(task) if task.enhance_text else task.text.strip()
+    return PreviewSpeechTextResult(
+        prepared_text=prepared,
+        template=resolved.name,
+        enhance_text=task.enhance_text,
+    )
+
+
+def create_smart_tts_toolset(
+    *,
+    registry: TemplateRegistry | None = None,
+    default_mix: bool | None = None,
+    instructions: str | None = None,
+    include_preview: bool = True,
+    include_list: bool = True,
+) -> FunctionToolset[HasSmartTTS]:
     """Build a FunctionToolset with smart-tts synthesis tools."""
-    toolset: FunctionToolset[SmartTTSDeps] = FunctionToolset(
+    active_registry = registry or default_template_registry()
+    toolset: FunctionToolset[HasSmartTTS] = FunctionToolset(
         id="smart_tts",
-        instructions=(
-            "Use these tools to synthesize Russian speech with Fish Audio. "
-            "Prefer template 'investigation' for noir detective narration. "
-            "Set mix=false for speech-only output."
-        ),
+        instructions=instructions or DEFAULT_TOOLSET_INSTRUCTIONS,
     )
 
     @toolset.tool
     async def synthesize_speech(
-        ctx: RunContext[SmartTTSDeps],
+        ctx: RunContext[HasSmartTTS],
         request: SynthesizeSpeechRequest,
     ) -> SynthesizeSpeechResult:
         """Synthesize speech from text using a generation template."""
-        return await run_synthesize_speech(ctx.deps, request)
-
-    @toolset.tool_plain
-    def list_generation_templates() -> list[TemplateInfo]:
-        """List built-in generation templates and their capabilities."""
-        items: list[TemplateInfo] = []
-        for name, template in sorted(BUILTIN_TEMPLATES.items()):
-            items.append(
-                TemplateInfo(
-                    name=name,
-                    language=template.language,
-                    emotion=template.emotion,
-                    has_music=bool(template.music_prompt or template.music_path),
-                    has_ambient=bool(template.ambient_prompt or template.ambient_path),
-                )
-            )
-        return items
-
-    @toolset.tool
-    async def preview_speech_text(
-        ctx: RunContext[SmartTTSDeps],
-        request: PreviewSpeechTextRequest,
-    ) -> PreviewSpeechTextResult:
-        """Preview prepared Fish Audio text without calling TTS."""
-        tpl = _resolve_template(request.template)
-        overrides: dict[str, Any] = {}
-        if request.emotion is not None:
-            overrides["emotion"] = request.emotion
-        task = tpl.to_task(request.text, mix=False, **overrides)
-        prepared = prepare_text(task) if task.enhance_text else task.text.strip()
-        return PreviewSpeechTextResult(
-            prepared_text=prepared,
-            template=request.template,
-            enhance_text=task.enhance_text,
+        return await run_synthesize_speech(
+            ctx.deps,
+            request,
+            registry=active_registry,
+            default_mix=default_mix,
         )
+
+    if include_list:
+
+        @toolset.tool_plain
+        def list_generation_templates() -> list[TemplateInfo]:
+            """List generation templates and their capabilities."""
+            return list_generation_templates_from_registry(active_registry)
+
+    if include_preview:
+
+        @toolset.tool
+        async def preview_speech_text(
+            ctx: RunContext[HasSmartTTS],
+            request: PreviewSpeechTextRequest,
+        ) -> PreviewSpeechTextResult:
+            """Preview prepared Fish Audio text without calling TTS."""
+            return await run_preview_speech_text(request, registry=active_registry)
 
     return toolset

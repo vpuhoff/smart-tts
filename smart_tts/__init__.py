@@ -13,15 +13,22 @@ from smart_tts.models import (
 from smart_tts.templates import (
     BUILTIN_TEMPLATES,
     INVESTIGATION,
+    BuiltinTemplateRegistry,
+    ChainedTemplateRegistry,
     GenerationTemplate,
+    TemplateRegistry,
+    default_template_registry,
     get_template,
+    resolve_template,
 )
 from smart_tts.tts import SmartTTS, synthesize, synthesize_with_template
 
 __all__ = [
     "AsyncSmartTTS",
     "BUILTIN_TEMPLATES",
+    "BuiltinTemplateRegistry",
     "CachedVoice",
+    "ChainedTemplateRegistry",
     "GenerationTemplate",
     "INVESTIGATION",
     "OutputFormat",
@@ -30,10 +37,13 @@ __all__ = [
     "SynthesisResult",
     "SynthesisTask",
     "TTSModel",
+    "TemplateRegistry",
     "VoiceSettings",
     "asynthesize",
     "asynthesize_with_template",
+    "default_template_registry",
     "get_template",
+    "resolve_template",
     "synthesize",
     "synthesize_with_template",
 ]

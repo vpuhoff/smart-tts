@@ -7,7 +7,7 @@ import pytest
 import respx
 
 from smart_tts import INVESTIGATION, GenerationTemplate, get_template
-from smart_tts.models import SynthesisTask, TTSModel, VoiceSettings
+from smart_tts.models import TTSModel, VoiceSettings
 from smart_tts.tts import SmartTTS, synthesize_with_template
 from smart_tts.voices.registry import VoiceRegistry
 
@@ -50,6 +50,7 @@ def test_from_dict_roundtrip(tmp_path) -> None:
     template = INVESTIGATION.with_overrides(
         voice_id="voice-abc",
         voice_settings=VoiceSettings(temperature=0.8, speed=1.1),
+        mix_default=True,
     )
     path = tmp_path / "template.json"
     template.save_json(path)
@@ -58,6 +59,7 @@ def test_from_dict_roundtrip(tmp_path) -> None:
     assert loaded.name == "investigation"
     assert loaded.voice_id == "voice-abc"
     assert loaded.model == TTSModel.ELEVEN_V3
+    assert loaded.mix_default is True
     assert loaded.voice_settings is not None
     assert loaded.voice_settings.temperature == pytest.approx(0.8)
     assert loaded.to_dict() == json.loads(path.read_text(encoding="utf-8"))

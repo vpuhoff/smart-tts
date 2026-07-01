@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +38,7 @@ class GenerationTemplate:
     ambient_volume: float = 0.18
     speech_volume: float = 1.0
     bed_weight: float = 0.68
+    mix_default: bool = False
 
     def with_overrides(self, **kwargs: Any) -> GenerationTemplate:
         return replace(self, **kwargs)
@@ -138,11 +139,17 @@ INVESTIGATION = GenerationTemplate(
     ambient_volume=0.18,
     speech_volume=1.0,
     bed_weight=0.68,
+    mix_default=True,
 )
 
 BUILTIN_TEMPLATES: dict[str, GenerationTemplate] = {
     "investigation": INVESTIGATION,
     "default": GenerationTemplate(),
+}
+
+BUILTIN_TEMPLATE_DESCRIPTIONS: dict[str, str] = {
+    "investigation": "Noir detective narration with music and ambient beds.",
+    "default": "Minimal speech-only defaults.",
 }
 
 

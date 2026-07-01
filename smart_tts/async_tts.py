@@ -27,6 +27,8 @@ from smart_tts.voices.registry import VoiceRegistry
 
 logger = logging.getLogger(__name__)
 
+_shared_instance: AsyncSmartTTS | None = None
+
 
 class AsyncSmartTTS:
     def __init__(self, config: SmartTTSConfig) -> None:
@@ -38,7 +40,18 @@ class AsyncSmartTTS:
     def from_env(cls, *, dotenv_path: str | Path | None = None) -> AsyncSmartTTS:
         return cls(SmartTTSConfig.from_env(dotenv_path=dotenv_path))
 
+    @classmethod
+    def get_or_create(cls, config: SmartTTSConfig | None = None) -> AsyncSmartTTS:
+        """Return a process-wide shared instance (caller should ``aclose()`` on shutdown)."""
+        global _shared_instance
+        if _shared_instance is None:
+            _shared_instance = cls(config or SmartTTSConfig.from_env())
+        return _shared_instance
+
     async def aclose(self) -> None:
+        global _shared_instance
+        if _shared_instance is self:
+            _shared_instance = None
         await self._fish.aclose()
 
     async def __aenter__(self) -> AsyncSmartTTS:

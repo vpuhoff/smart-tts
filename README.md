@@ -315,7 +315,7 @@ Install the extension::
 pip install smart-tts[pydantic-ai]
 ```
 
-Register a toolset with an agent and pass `SmartTTSDeps` as runtime dependencies:
+Register a toolset with an agent and pass `SmartTTSDeps` (or any deps implementing `HasSmartTTS`) as runtime dependencies:
 
 ```python
 from pathlib import Path
@@ -328,12 +328,13 @@ from smart_tts.extensions.pydantic_ai import (
     create_smart_tts_toolset,
     resolve_openrouter_model,
 )
+from smart_tts.templates import default_template_registry
 
 async with AsyncSmartTTS.from_env() as tts:
     agent = Agent(
         resolve_openrouter_model(),  # OPENROUTER_API_KEY + model from .env
         deps_type=SmartTTSDeps,
-        toolsets=[create_smart_tts_toolset()],
+        toolsets=[create_smart_tts_toolset(registry=default_template_registry())],
     )
     result = await agent.run(
         "Озвучь донесение: Обнаружена цель.",
@@ -341,12 +342,14 @@ async with AsyncSmartTTS.from_env() as tts:
     )
 ```
 
+For custom template sources (e.g. PostgreSQL) and existing `AgentDeps`, see [agents.md — Integrating with AgentDeps](agents.md#интеграция-с-существующим-agentdeps).
+
 Tools:
 
 | Tool | Description |
 |------|-------------|
 | `synthesize_speech` | Synthesize audio from text + template, save MP3, return metadata |
-| `list_generation_templates` | List built-in templates |
+| `list_generation_templates` | List templates from the configured registry |
 | `preview_speech_text` | Preview prepared Fish text without API call |
 
 Полный пример: [`example_pydantic_ai.py`](example_pydantic_ai.py)

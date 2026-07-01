@@ -171,6 +171,98 @@ result = await run_synthesize_speech(
 )
 ```
 
+### Интеграция с существующим AgentDeps
+
+Если у агента уже есть свой `deps_type`, не создавай отдельный `SmartTTSDeps`. Реализуй протокол `HasSmartTTS` — два property: `tts` и `tts_output_dir`.
+
+Шаблоны подключай через `TemplateRegistry` (например PostgreSQL в продукте):
+
+```python
+from dataclasses import dataclass
+from pathlib import Path
+
+from pydantic_ai import Agent
+
+from smart_tts.async_tts import AsyncSmartTTS
+from smart_tts.extensions.pydantic_ai import (
+    TemplateInfo,
+    create_smart_tts_toolset,
+    run_synthesize_speech,
+    SynthesizeSpeechRequest,
+    SynthesizeSpeechResult,
+)
+from smart_tts.templates import GenerationTemplate, TemplateRegistry, TemplateRegistryInfo
+
+
+@dataclass
+class AgentDeps:
+    _tts: AsyncSmartTTS
+    _output: Path
+
+    @property
+    def tts(self) -> AsyncSmartTTS:
+        return self._tts
+
+    @property
+    def tts_output_dir(self) -> Path:
+        return self._output
+
+
+class PostgresTemplateRegistry:
+    """Пример: шаблоны из JSONB в PostgreSQL."""
+
+    def get(self, slug: str) -> GenerationTemplate:
+        row = ...  # SELECT template_config FROM templates WHERE slug = slug
+        return GenerationTemplate.from_dict(row.template_config)
+
+    def list_info(self) -> list[TemplateRegistryInfo]:
+        rows = ...  # SELECT slug, description, template_config FROM templates
+        return [
+            TemplateRegistryInfo(
+                name=row.slug,
+                template=GenerationTemplate.from_dict(row.template_config),
+                description=row.description,
+            )
+            for row in rows
+        ]
+
+
+async def deliver_speech(result: SynthesizeSpeechResult) -> None:
+    ...  # S3, Telegram и т.д.
+
+
+registry = PostgresTemplateRegistry(...)
+toolset = create_smart_tts_toolset(registry=registry)
+
+agent = Agent(
+    "openrouter:google/gemini-2.5-flash",
+    deps_type=AgentDeps,
+    toolsets=[toolset],
+)
+
+# Прямой вызов с уже resolved шаблоном (project → agent → default):
+template = registry.get("investigation")
+await run_synthesize_speech(
+    deps,
+    SynthesizeSpeechRequest(text="..."),
+    template=template,
+)
+
+# Post-synthesis hook на SmartTTSDeps:
+# deps.on_synthesized = deliver_speech
+```
+
+Ключевые extension points:
+
+| API | Назначение |
+|-----|------------|
+| `TemplateRegistry` | Источник шаблонов (БД, builtin chain) |
+| `run_synthesize_speech(..., template=)` | Передать уже resolved `GenerationTemplate` |
+| `run_synthesize_speech(..., registry=)` | Кастомный registry для `request.template` slug |
+| `SynthesizeSpeechRequest.mix=None` | Взять `mix_default` из шаблона |
+| `SmartTTSDeps.on_synthesized` | Delivery после записи файла |
+| `create_smart_tts_toolset(registry=...)` | Одна точка конфигурации toolset |
+
 ### Запуск примера
 
 ```bash
