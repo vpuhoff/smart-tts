@@ -14,13 +14,14 @@ Example::
     from smart_tts.extensions.pydantic_ai import (
         SmartTTSDeps,
         create_smart_tts_toolset,
+        resolve_openrouter_model,
     )
 
     async def main() -> None:
         async with AsyncSmartTTS.from_env() as tts:
             deps = SmartTTSDeps(tts=tts, output_dir=Path("output"))
             agent = Agent(
-                "openai:gpt-4o-mini",
+                resolve_openrouter_model(),
                 deps_type=SmartTTSDeps,
                 toolsets=[create_smart_tts_toolset()],
             )
@@ -33,13 +34,14 @@ Example::
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from pydantic_ai import FunctionToolset, RunContext
@@ -56,13 +58,25 @@ from smart_tts.templates import BUILTIN_TEMPLATES, GenerationTemplate, get_templ
 from smart_tts.text import prepare_text
 
 __all__ = [
+    "BuiltinTemplateName",
+    "EmotionTag",
+    "PreviewSpeechTextRequest",
+    "PreviewSpeechTextResult",
     "SmartTTSDeps",
+    "SynthesisMetadata",
     "SynthesizeSpeechRequest",
     "SynthesizeSpeechResult",
     "TemplateInfo",
     "create_smart_tts_toolset",
+    "require_openrouter_api_key",
+    "resolve_openrouter_model",
     "run_synthesize_speech",
 ]
+
+DEFAULT_OPENROUTER_MODEL = "google/gemini-2.5-flash"
+
+BuiltinTemplateName = Literal["investigation", "default"]
+EmotionTag = Literal["warm", "serious", "excited", "sad", "whisper", "calm"]
 
 
 @dataclass
@@ -83,26 +97,70 @@ class SmartTTSDeps:
         return cls(tts=tts, output_dir=Path(output_dir))
 
 
+def resolve_openrouter_model(model: str | None = None) -> str:
+    """Build a Pydantic AI model id for OpenRouter.
+
+    Reads, in order: explicit ``model``, ``PYDANTIC_AI_MODEL``,
+    ``OPENROUTER_API_TTS_PROMPT_MODEL``, ``OPENROUTER_MODEL``.
+    Adds the ``openrouter:`` prefix when missing.
+  """
+    chosen = (
+        model
+        or os.getenv("PYDANTIC_AI_MODEL")
+        or os.getenv("OPENROUTER_API_TTS_PROMPT_MODEL")
+        or os.getenv("OPENROUTER_MODEL")
+        or DEFAULT_OPENROUTER_MODEL
+    ).strip()
+    if ":" in chosen:
+        return chosen
+    return f"openrouter:{chosen}"
+
+
+def require_openrouter_api_key() -> str:
+    """Return ``OPENROUTER_API_KEY`` or raise if it is missing."""
+    api_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("Missing OPENROUTER_API_KEY environment variable.")
+    return api_key
+
+
 class SynthesizeSpeechRequest(BaseModel):
-    """Input for speech synthesis."""
+    """Input for speech synthesis via a generation template."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "text": 'Срочное донесение. <break time="1.2s" /> Обнаружена цель.',
+                    "template": "investigation",
+                    "mix": True,
+                    "emotion": "serious",
+                }
+            ]
+        }
+    )
 
     text: str = Field(
         description=(
             "Script to synthesize. SSML breaks like "
             '<break time="1.0s"/> are converted to Fish pause tags when enhance_text is enabled.'
         ),
+        min_length=1,
     )
     template: str = Field(
         default="investigation",
-        description="Built-in template name (investigation, default) or path to a JSON template file.",
+        description=(
+            "Generation template: built-in name (investigation, default) "
+            "or path to a JSON template file."
+        ),
     )
     mix: bool = Field(
         default=True,
         description="Whether to mix speech with music/ambient beds from the template.",
     )
-    emotion: str | None = Field(
+    emotion: EmotionTag | None = Field(
         default=None,
-        description="Optional emotion override (warm, serious, excited, sad, whisper, calm).",
+        description="Optional emotion delivery tag override for Fish Audio.",
     )
     output_filename: str | None = Field(
         default=None,
@@ -110,26 +168,128 @@ class SynthesizeSpeechRequest(BaseModel):
     )
 
 
-class SynthesizeSpeechResult(BaseModel):
-    """Synthesis result returned to the agent."""
+class SynthesisMetadata(BaseModel):
+    """Technical metadata from the synthesis pipeline."""
 
-    path: str
-    duration_seconds: float
-    enhanced_text: str
-    model: str
-    voice_id: str
-    mixed: bool
-    metadata: dict[str, Any]
+    duration_ms: int = Field(
+        description="Total synthesis time in milliseconds, including mixing when enabled.",
+        ge=0,
+    )
+    char_count: int = Field(
+        description="Length of the prepared text sent to Fish Audio.",
+        ge=0,
+    )
+    voice_id: str = Field(
+        description="Fish Audio reference_id used for synthesis.",
+        min_length=1,
+    )
+    model: str = Field(
+        description="Requested TTS model identifier.",
+        min_length=1,
+    )
+    fish_model: str = Field(
+        description="Actual Fish Audio model used (may differ after credit fallback).",
+        min_length=1,
+    )
+    mixed: bool = Field(
+        description="Whether music or ambient beds were mixed into the output.",
+    )
+    music: bool = Field(
+        description="Whether a music bed was included in the final mix.",
+    )
+    ambient: bool = Field(
+        description="Whether an ambient bed was included in the final mix.",
+    )
+
+
+class SynthesizeSpeechResult(BaseModel):
+    """Synthesis result returned to the agent after audio is saved to disk."""
+
+    path: str = Field(
+        description="Absolute path to the generated MP3 file.",
+        min_length=1,
+    )
+    duration_seconds: float = Field(
+        description="Audio duration in seconds.",
+        ge=0,
+    )
+    enhanced_text: str = Field(
+        description="Prepared Fish Audio script after break conversion and emotion tags.",
+    )
+    model: str = Field(
+        description="Requested TTS model identifier.",
+        min_length=1,
+    )
+    voice_id: str = Field(
+        description="Fish Audio reference_id used for synthesis.",
+        min_length=1,
+    )
+    mixed: bool = Field(
+        description="Whether the output includes mixed music/ambient beds.",
+    )
+    metadata: SynthesisMetadata = Field(
+        description="Technical synthesis metadata from the smart-tts pipeline.",
+    )
 
 
 class TemplateInfo(BaseModel):
     """Summary of a built-in generation template."""
 
-    name: str
-    language: str | None = None
-    emotion: str | None = None
-    has_music: bool
-    has_ambient: bool
+    name: str = Field(
+        description="Template identifier passed to synthesize_speech.",
+        min_length=1,
+    )
+    language: str | None = Field(
+        default=None,
+        description="Default language hint for the template, if configured.",
+    )
+    emotion: str | None = Field(
+        default=None,
+        description="Default Fish Audio emotion tag for the template, if configured.",
+    )
+    has_music: bool = Field(
+        description="Whether the template defines a music prompt or music file path.",
+    )
+    has_ambient: bool = Field(
+        description="Whether the template defines an ambient prompt or ambient file path.",
+    )
+
+
+class PreviewSpeechTextRequest(BaseModel):
+    """Input for previewing prepared Fish Audio text without calling TTS."""
+
+    text: str = Field(
+        description=(
+            "Source script. SSML breaks are converted to Fish pause tags when enhance_text is enabled."
+        ),
+        min_length=1,
+    )
+    template: str = Field(
+        default="investigation",
+        description=(
+            "Generation template: built-in name (investigation, default) "
+            "or path to a JSON template file."
+        ),
+    )
+    emotion: EmotionTag | None = Field(
+        default=None,
+        description="Optional emotion delivery tag override for the preview.",
+    )
+
+
+class PreviewSpeechTextResult(BaseModel):
+    """Prepared Fish Audio script returned by preview_speech_text."""
+
+    prepared_text: str = Field(
+        description="Text after SSML break conversion and optional emotion prefix.",
+    )
+    template: str = Field(
+        description="Template name or path used for preparation.",
+        min_length=1,
+    )
+    enhance_text: bool = Field(
+        description="Whether text enhancement was applied for this template.",
+    )
 
 
 def _resolve_template(name_or_path: str) -> GenerationTemplate:
@@ -178,7 +338,7 @@ async def run_synthesize_speech(
         model=result.model.value,
         voice_id=result.voice.voice_id,
         mixed=bool(result.metadata.get("mixed")),
-        metadata=result.metadata,
+        metadata=SynthesisMetadata.model_validate(result.metadata),
     )
 
 
@@ -220,16 +380,19 @@ def create_smart_tts_toolset() -> FunctionToolset[SmartTTSDeps]:
     @toolset.tool
     async def preview_speech_text(
         ctx: RunContext[SmartTTSDeps],
-        text: str,
-        template: str = "investigation",
-        emotion: str | None = None,
-    ) -> str:
+        request: PreviewSpeechTextRequest,
+    ) -> PreviewSpeechTextResult:
         """Preview prepared Fish Audio text without calling TTS."""
-        tpl = _resolve_template(template)
+        tpl = _resolve_template(request.template)
         overrides: dict[str, Any] = {}
-        if emotion is not None:
-            overrides["emotion"] = emotion
-        task = tpl.to_task(text, mix=False, **overrides)
-        return prepare_text(task) if task.enhance_text else task.text.strip()
+        if request.emotion is not None:
+            overrides["emotion"] = request.emotion
+        task = tpl.to_task(request.text, mix=False, **overrides)
+        prepared = prepare_text(task) if task.enhance_text else task.text.strip()
+        return PreviewSpeechTextResult(
+            prepared_text=prepared,
+            template=request.template,
+            enhance_text=task.enhance_text,
+        )
 
     return toolset

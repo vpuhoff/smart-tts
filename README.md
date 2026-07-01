@@ -323,11 +323,15 @@ from pathlib import Path
 from pydantic_ai import Agent
 
 from smart_tts.async_tts import AsyncSmartTTS
-from smart_tts.extensions.pydantic_ai import SmartTTSDeps, create_smart_tts_toolset
+from smart_tts.extensions.pydantic_ai import (
+    SmartTTSDeps,
+    create_smart_tts_toolset,
+    resolve_openrouter_model,
+)
 
 async with AsyncSmartTTS.from_env() as tts:
     agent = Agent(
-        "openai:gpt-4o-mini",
+        resolve_openrouter_model(),  # OPENROUTER_API_KEY + model from .env
         deps_type=SmartTTSDeps,
         toolsets=[create_smart_tts_toolset()],
     )
@@ -344,6 +348,17 @@ Tools:
 | `synthesize_speech` | Synthesize audio from text + template, save MP3, return metadata |
 | `list_generation_templates` | List built-in templates |
 | `preview_speech_text` | Preview prepared Fish text without API call |
+
+Полный пример: [`example_pydantic_ai.py`](example_pydantic_ai.py)
+
+```bash
+pip install smart-tts[pydantic-ai]
+uv run python example_pydantic_ai.py              # прямой вызов tools
+uv run python example_pydantic_ai.py --agent        # агент + TestModel
+uv run python example_pydantic_ai.py --agent --live # агент + OpenRouter LLM
+```
+
+Requires `OPENROUTER_API_KEY`. Model is taken from `--model`, `PYDANTIC_AI_MODEL`, or `OPENROUTER_API_TTS_PROMPT_MODEL`.
 
 ### Voice registry
 
@@ -395,6 +410,7 @@ MIT — see [LICENSE](LICENSE).
 
 ## Links
 
+- [Agent integration guide](agents.md)
 - [GitHub repository](https://github.com/vpuhoff/smart-tts)
 - [PyPI package](https://pypi.org/project/smart-tts/)
 - [Design specification (Russian)](spec.md)
