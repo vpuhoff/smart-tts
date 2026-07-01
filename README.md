@@ -307,6 +307,44 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+### Pydantic AI tools (optional)
+
+Install the extension::
+
+```bash
+pip install smart-tts[pydantic-ai]
+```
+
+Register a toolset with an agent and pass `SmartTTSDeps` as runtime dependencies:
+
+```python
+from pathlib import Path
+
+from pydantic_ai import Agent
+
+from smart_tts.async_tts import AsyncSmartTTS
+from smart_tts.extensions.pydantic_ai import SmartTTSDeps, create_smart_tts_toolset
+
+async with AsyncSmartTTS.from_env() as tts:
+    agent = Agent(
+        "openai:gpt-4o-mini",
+        deps_type=SmartTTSDeps,
+        toolsets=[create_smart_tts_toolset()],
+    )
+    result = await agent.run(
+        "Озвучь донесение: Обнаружена цель.",
+        deps=SmartTTSDeps(tts=tts, output_dir=Path("output")),
+    )
+```
+
+Tools:
+
+| Tool | Description |
+|------|-------------|
+| `synthesize_speech` | Synthesize audio from text + template, save MP3, return metadata |
+| `list_generation_templates` | List built-in templates |
+| `preview_speech_text` | Preview prepared Fish text without API call |
+
 ### Voice registry
 
 ```python
