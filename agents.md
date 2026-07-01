@@ -249,18 +249,82 @@ await run_synthesize_speech(
 )
 
 # Post-synthesis hook на SmartTTSDeps:
-# deps.on_synthesized = deliver_speech
+# async def on_synthesized(ctx, result):
+#     agent_id = getattr(ctx.deps, "active_agent_id", None)
+#     await deliver_speech_from_path(result.path, agent_id=agent_id)
+# deps.on_synthesized = on_synthesized
 ```
+
+### Template resolve chain (v1.9.5)
+
+Когда `SynthesizeSpeechRequest.template` не задан (`None`) или пустой:
+
+```text
+request.template (if non-empty)
+  → registry.get_default()
+  → "investigation"  # hard fallback (HARD_TEMPLATE_FALLBACK)
+```
+
+Пример registry с project/agent default:
+
+```python
+class PostgresChainedTemplateRegistry:
+    def get_default(self) -> str | None:
+        if self._project.default_tts_template_slug:
+            return self._project.default_tts_template_slug
+        if self._agent_config.get("default_tts_template_slug"):
+            return self._agent_config["default_tts_template_slug"]
+        return None  # chain → builtin "default"
+```
+
+Voiceover fallback без явного template:
+
+```python
+from smart_tts.extensions.pydantic_ai import make_run_context, run_synthesize_speech
+
+await run_synthesize_speech(
+    deps,
+    SynthesizeSpeechRequest(text=script),
+    registry=registry,
+    ctx=make_run_context(deps),
+    timeout_sec=120,
+)
+```
+
+### on_synthesized(ctx, result)
+
+Hook вызывается **после** успешной записи MP3, **до** return из `run_synthesize_speech`.
+При ошибке синтеза hook не вызывается; при ошибке hook exception пробрасывается наверх.
+
+Legacy `on_synthesized(result)` поддерживается с `DeprecationWarning`.
+Tool path всегда передаёт `ctx`; для fallback вне агента используй `make_run_context(deps)`.
+
+### timeout_sec
+
+```python
+await run_synthesize_speech(deps, request, timeout_sec=120)
+```
+
+Приоритет: явный аргумент → env `SMART_TTS_SYNTHESIS_TIMEOUT_SEC` → без лимита.
+
+Timeout покрывает Fish TTS + mix + probe duration. **Post-synthesis hook вне timeout** —
+медленная доставка (S3/Telegram) не должна ронять tool после успешного synth.
+При превышении — `SynthesisTimeoutError` (не generic `TimeoutError`).
 
 Ключевые extension points:
 
 | API | Назначение |
 |-----|------------|
 | `TemplateRegistry` | Источник шаблонов (БД, builtin chain) |
+| `TemplateRegistry.get_default()` | Slug по умолчанию когда template опущен |
+| `resolve_request_template()` | Единая точка resolve slug → template |
 | `run_synthesize_speech(..., template=)` | Передать уже resolved `GenerationTemplate` |
 | `run_synthesize_speech(..., registry=)` | Кастомный registry для `request.template` slug |
+| `run_synthesize_speech(..., ctx=)` | RunContext для hook и fallback path |
+| `run_synthesize_speech(..., timeout_sec=)` | Pipeline timeout (synth inside, hook outside) |
+| `make_run_context(deps)` | Minimal RunContext вне `Agent.iter` |
 | `SynthesizeSpeechRequest.mix=None` | Взять `mix_default` из шаблона |
-| `SmartTTSDeps.on_synthesized` | Delivery после записи файла |
+| `SmartTTSDeps.on_synthesized(ctx, result)` | Delivery после записи файла |
 | `create_smart_tts_toolset(registry=...)` | Одна точка конфигурации toolset |
 
 ### Запуск примера

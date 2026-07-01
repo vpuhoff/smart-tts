@@ -9,11 +9,13 @@ from smart_tts.templates import (
     BuiltinTemplateRegistry,
     ChainedTemplateRegistry,
     GenerationTemplate,
+    HARD_TEMPLATE_FALLBACK,
     INVESTIGATION,
     JsonFileTemplateRegistry,
     TemplateRegistryInfo,
     default_template_registry,
     get_template,
+    resolve_request_template,
     resolve_template,
 )
 
@@ -32,6 +34,76 @@ def test_builtin_registry_list_info() -> None:
     investigation = next(item for item in items if item.name == "investigation")
     assert investigation.description
     assert investigation.template.mix_default is True
+    assert investigation.is_default is False
+
+    default_item = next(item for item in items if item.name == "default")
+    assert default_item.is_default is True
+
+
+def test_builtin_get_default() -> None:
+    registry = BuiltinTemplateRegistry()
+    assert registry.get_default() == "default"
+
+
+def test_chained_get_default_first_match() -> None:
+    class ProjectRegistry:
+        def get(self, name: str) -> GenerationTemplate:
+            if name == "brief":
+                return GenerationTemplate(name="brief")
+            raise KeyError(name)
+
+        def list_info(self) -> list[TemplateRegistryInfo]:
+            return []
+
+        def get_default(self) -> str | None:
+            return "brief"
+
+    chained = ChainedTemplateRegistry(ProjectRegistry(), BuiltinTemplateRegistry())
+    assert chained.get_default() == "brief"
+
+
+def test_chained_get_default_skips_none() -> None:
+    class NoDefaultRegistry:
+        def get(self, name: str) -> GenerationTemplate:
+            raise KeyError(name)
+
+        def list_info(self) -> list[TemplateRegistryInfo]:
+            return []
+
+    chained = ChainedTemplateRegistry(NoDefaultRegistry(), BuiltinTemplateRegistry())
+    assert chained.get_default() == "default"
+
+
+def test_resolve_request_template_none_uses_registry_default() -> None:
+    slug, template = resolve_request_template(None, BuiltinTemplateRegistry())
+    assert slug == "default"
+    assert template.name == "default"
+
+
+def test_resolve_request_template_none_fallback_investigation() -> None:
+    class NoDefaultRegistry:
+        def get(self, name: str) -> GenerationTemplate:
+            if name == HARD_TEMPLATE_FALLBACK:
+                return INVESTIGATION
+            raise KeyError(name)
+
+        def list_info(self) -> list[TemplateRegistryInfo]:
+            return []
+
+    slug, template = resolve_request_template(None, NoDefaultRegistry())
+    assert slug == HARD_TEMPLATE_FALLBACK
+    assert template is INVESTIGATION
+
+
+def test_resolve_request_template_explicit_slug() -> None:
+    slug, template = resolve_request_template("investigation", BuiltinTemplateRegistry())
+    assert slug == "investigation"
+    assert template is INVESTIGATION
+
+
+def test_resolve_request_template_empty_string_uses_default() -> None:
+    slug, _template = resolve_request_template("  ", BuiltinTemplateRegistry())
+    assert slug == "default"
 
 
 def test_json_file_registry(tmp_path: Path) -> None:

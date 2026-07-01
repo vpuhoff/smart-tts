@@ -37,3 +37,12 @@ class ElevenLabsAPIError(SmartTTSError):
 
 class AudioMixError(SmartTTSError):
     """ffmpeg mixing failed."""
+
+
+class SynthesisTimeoutError(SmartTTSError):
+    """Synthesis pipeline exceeded the configured timeout."""
+
+    def __init__(self, timeout_sec: float, *, stage: str = "synthesis") -> None:
+        self.timeout_sec = timeout_sec
+        self.stage = stage
+        super().__init__(f"Synthesis timed out after {timeout_sec}s (stage={stage})")

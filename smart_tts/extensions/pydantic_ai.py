@@ -34,13 +34,16 @@ Example::
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import re
 import time
+import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -55,11 +58,13 @@ except ImportError as exc:  # pragma: no cover - optional dependency
 from smart_tts.async_tts import AsyncSmartTTS
 from smart_tts.audio.probe import audio_duration_seconds
 from smart_tts.config import SmartTTSConfig
+from smart_tts.exceptions import SynthesisTimeoutError
 from smart_tts.templates import (
     GenerationTemplate,
     TemplateRegistry,
     TemplateRegistryInfo,
     default_template_registry,
+    resolve_request_template,
     resolve_template,
 )
 from smart_tts.telemetry import async_span
@@ -69,6 +74,8 @@ __all__ = [
     "BuiltinTemplateName",
     "EmotionTag",
     "HasSmartTTS",
+    "LegacyOnSynthesizedCallback",
+    "OnSynthesizedCallback",
     "PreviewSpeechTextRequest",
     "PreviewSpeechTextResult",
     "SmartTTSDeps",
@@ -78,6 +85,7 @@ __all__ = [
     "TemplateInfo",
     "create_smart_tts_toolset",
     "list_generation_templates",
+    "make_run_context",
     "require_openrouter_api_key",
     "resolve_openrouter_model",
     "run_preview_speech_text",
@@ -90,9 +98,13 @@ DEFAULT_TOOLSET_INSTRUCTIONS = (
     "Prefer template 'investigation' for noir detective narration. "
     "Omit mix to use each template's default; set mix=false for speech-only output."
 )
+SYNTHESIS_TIMEOUT_ENV = "SMART_TTS_SYNTHESIS_TIMEOUT_SEC"
+_LEGACY_ON_SYNTHESIZED_WARNED = False
 
 BuiltinTemplateName = Literal["investigation", "default"]
 EmotionTag = Literal["warm", "serious", "excited", "sad", "whisper", "calm"]
+
+DepsT = TypeVar("DepsT")
 
 
 class HasSmartTTS(Protocol):
@@ -105,13 +117,35 @@ class HasSmartTTS(Protocol):
     def tts_output_dir(self) -> Path: ...
 
 
+OnSynthesizedCallback = Callable[
+    [RunContext[HasSmartTTS], "SynthesizeSpeechResult"],
+    Awaitable[Any],
+]
+LegacyOnSynthesizedCallback = Callable[
+    ["SynthesizeSpeechResult"],
+    Awaitable[Any],
+]
+
+
+@dataclass
+class _MinimalRunContext(Generic[DepsT]):
+    """Minimal RunContext stand-in for run_synthesize_speech outside Agent.iter."""
+
+    deps: DepsT
+
+
+def make_run_context(deps: HasSmartTTS) -> RunContext[HasSmartTTS]:
+    """Build a minimal RunContext for run_synthesize_speech outside Agent.iter."""
+    return cast(RunContext[HasSmartTTS], _MinimalRunContext(deps=deps))
+
+
 @dataclass
 class SmartTTSDeps:
     """Agent dependencies for smart-tts tools."""
 
     tts: AsyncSmartTTS
     output_dir: Path = field(default_factory=lambda: Path("output"))
-    on_synthesized: Callable[["SynthesizeSpeechResult"], Awaitable[Any]] | None = None
+    on_synthesized: OnSynthesizedCallback | LegacyOnSynthesizedCallback | None = None
 
     @property
     def tts_output_dir(self) -> Path:
@@ -178,11 +212,10 @@ class SynthesizeSpeechRequest(BaseModel):
         ),
         min_length=1,
     )
-    template: str = Field(
-        default="investigation",
+    template: str | None = Field(
+        default=None,
         description=(
-            "Generation template: built-in name (investigation, default) "
-            "or path to a JSON template file."
+            "Template slug. Omit to use registry default, then 'investigation' fallback."
         ),
     )
     mix: bool | None = Field(
@@ -303,6 +336,10 @@ class TemplateInfo(BaseModel):
     has_ambient: bool = Field(
         description="Whether the template defines an ambient prompt or ambient file path.",
     )
+    is_default: bool = Field(
+        default=False,
+        description="Whether this template is the registry default when template is omitted.",
+    )
 
 
 class PreviewSpeechTextRequest(BaseModel):
@@ -314,11 +351,10 @@ class PreviewSpeechTextRequest(BaseModel):
         ),
         min_length=1,
     )
-    template: str = Field(
-        default="investigation",
+    template: str | None = Field(
+        default=None,
         description=(
-            "Generation template: built-in name (investigation, default) "
-            "or path to a JSON template file."
+            "Template slug. Omit to use registry default, then builtin fallback."
         ),
     )
     emotion: EmotionTag | None = Field(
@@ -353,6 +389,7 @@ def _template_info_from_registry(entry: TemplateRegistryInfo) -> TemplateInfo:
         emotion=template.emotion,
         has_music=bool(template.music_prompt or template.music_path),
         has_ambient=bool(template.ambient_prompt or template.ambient_path),
+        is_default=entry.is_default,
     )
 
 
@@ -377,6 +414,68 @@ def _output_path(deps: HasSmartTTS, template_name: str, filename: str | None) ->
     return deps.tts_output_dir / f"{slug}_{int(time.time())}.mp3"
 
 
+def _accepts_run_context(callback: Callable[..., Awaitable[Any]]) -> bool:
+    try:
+        signature = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return False
+    params = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    ]
+    if params and params[0].name == "self":
+        params = params[1:]
+    return len(params) >= 2
+
+
+def _warn_legacy_on_synthesized() -> None:
+    global _LEGACY_ON_SYNTHESIZED_WARNED
+    if _LEGACY_ON_SYNTHESIZED_WARNED:
+        return
+    _LEGACY_ON_SYNTHESIZED_WARNED = True
+    warnings.warn(
+        "on_synthesized(result) is deprecated; use on_synthesized(ctx, result) instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+async def _call_on_synthesized(
+    ctx: RunContext[HasSmartTTS] | None,
+    deps: HasSmartTTS,
+    result: SynthesizeSpeechResult,
+) -> None:
+    callback = getattr(deps, "on_synthesized", None)
+    if callback is None:
+        return
+
+    async with async_span("smart_tts.on_synthesized", template=result.template_name):
+        if ctx is not None and _accepts_run_context(callback):
+            await callback(ctx, result)
+        elif _accepts_run_context(callback):
+            return
+        else:
+            _warn_legacy_on_synthesized()
+            await callback(result)
+
+
+def _resolve_timeout_sec(explicit: float | None) -> float | None:
+    if explicit is not None:
+        if explicit <= 0:
+            raise ValueError("timeout_sec must be positive")
+        return explicit
+
+    env_value = os.getenv(SYNTHESIS_TIMEOUT_ENV, "").strip()
+    if not env_value:
+        return None
+    parsed = float(env_value)
+    if parsed <= 0:
+        raise ValueError(f"{SYNTHESIS_TIMEOUT_ENV} must be positive")
+    return parsed
+
+
 def list_generation_templates_from_registry(
     registry: TemplateRegistry | None = None,
 ) -> list[TemplateInfo]:
@@ -392,6 +491,43 @@ def list_generation_templates(
     return list_generation_templates_from_registry(registry)
 
 
+async def _core_synthesize_speech(
+    deps: HasSmartTTS,
+    request: SynthesizeSpeechRequest,
+    *,
+    resolved: GenerationTemplate,
+    mix: bool,
+) -> SynthesizeSpeechResult:
+    overrides: dict[str, Any] = {}
+    if request.emotion is not None:
+        overrides["emotion"] = request.emotion
+
+    output_path = _output_path(deps, resolved.name, request.output_filename)
+    result = await deps.tts.synthesize_text_to_file(
+        request.text,
+        resolved,
+        output_path,
+        mix=mix,
+        **overrides,
+    )
+    duration_ms = result.metadata.get("duration_ms")
+    if isinstance(duration_ms, (int, float)):
+        duration = max(duration_ms / 1000.0, 0.0)
+    else:
+        duration = audio_duration_seconds(output_path)
+
+    return SynthesizeSpeechResult(
+        path=str(output_path.resolve()),
+        duration_seconds=duration,
+        enhanced_text=result.enhanced_text,
+        model=result.model.value,
+        voice_id=result.voice.voice_id,
+        mixed=bool(result.metadata.get("mixed")),
+        template_name=resolved.name,
+        metadata=SynthesisMetadata.model_validate(result.metadata),
+    )
+
+
 async def run_synthesize_speech(
     deps: HasSmartTTS,
     request: SynthesizeSpeechRequest,
@@ -399,53 +535,46 @@ async def run_synthesize_speech(
     template: GenerationTemplate | None = None,
     registry: TemplateRegistry | None = None,
     default_mix: bool | None = None,
+    ctx: RunContext[HasSmartTTS] | None = None,
+    timeout_sec: float | None = None,
 ) -> SynthesizeSpeechResult:
-    resolved = (
-        template
-        if template is not None
-        else resolve_template(request.template, registry)
-    )
+    if template is not None:
+        resolved = template
+    else:
+        _, resolved = resolve_request_template(request.template, registry)
     mix = _resolve_mix(request.mix, resolved, default_mix)
+    timeout = _resolve_timeout_sec(timeout_sec)
 
     async with async_span(
         "smart_tts.tool.synthesize_speech",
         template=resolved.name,
         mix=mix,
         char_count=len(request.text),
-    ):
-        overrides: dict[str, Any] = {}
-        if request.emotion is not None:
-            overrides["emotion"] = request.emotion
+    ) as span:
+        try:
+            if timeout is not None:
+                speech_result = await asyncio.wait_for(
+                    _core_synthesize_speech(
+                        deps,
+                        request,
+                        resolved=resolved,
+                        mix=mix,
+                    ),
+                    timeout=timeout,
+                )
+            else:
+                speech_result = await _core_synthesize_speech(
+                    deps,
+                    request,
+                    resolved=resolved,
+                    mix=mix,
+                )
+        except asyncio.TimeoutError as exc:
+            span.set_attribute("smart_tts.timeout_sec", timeout)
+            span.record_exception(exc)
+            raise SynthesisTimeoutError(timeout, stage="synthesis") from exc
 
-        output_path = _output_path(deps, resolved.name, request.output_filename)
-        result = await deps.tts.synthesize_text_to_file(
-            request.text,
-            resolved,
-            output_path,
-            mix=mix,
-            **overrides,
-        )
-        duration_ms = result.metadata.get("duration_ms")
-        if isinstance(duration_ms, (int, float)):
-            duration = max(duration_ms / 1000.0, 0.0)
-        else:
-            duration = audio_duration_seconds(output_path)
-
-        speech_result = SynthesizeSpeechResult(
-            path=str(output_path.resolve()),
-            duration_seconds=duration,
-            enhanced_text=result.enhanced_text,
-            model=result.model.value,
-            voice_id=result.voice.voice_id,
-            mixed=bool(result.metadata.get("mixed")),
-            template_name=resolved.name,
-            metadata=SynthesisMetadata.model_validate(result.metadata),
-        )
-
-        callback = getattr(deps, "on_synthesized", None)
-        if callback is not None:
-            await callback(speech_result)
-
+        await _call_on_synthesized(ctx, deps, speech_result)
         return speech_result
 
 
@@ -455,11 +584,10 @@ async def run_preview_speech_text(
     template: GenerationTemplate | None = None,
     registry: TemplateRegistry | None = None,
 ) -> PreviewSpeechTextResult:
-    resolved = (
-        template
-        if template is not None
-        else resolve_template(request.template, registry)
-    )
+    if template is not None:
+        resolved = template
+    else:
+        _, resolved = resolve_request_template(request.template, registry)
     overrides: dict[str, Any] = {}
     if request.emotion is not None:
         overrides["emotion"] = request.emotion
@@ -498,6 +626,7 @@ def create_smart_tts_toolset(
             request,
             registry=active_registry,
             default_mix=default_mix,
+            ctx=ctx,
         )
 
     if include_list:

@@ -10,8 +10,10 @@ from smart_tts.models import (
     TTSModel,
     VoiceSettings,
 )
+from smart_tts.exceptions import SynthesisTimeoutError
 from smart_tts.templates import (
     BUILTIN_TEMPLATES,
+    HARD_TEMPLATE_FALLBACK,
     INVESTIGATION,
     BuiltinTemplateRegistry,
     ChainedTemplateRegistry,
@@ -19,6 +21,7 @@ from smart_tts.templates import (
     TemplateRegistry,
     default_template_registry,
     get_template,
+    resolve_request_template,
     resolve_template,
 )
 from smart_tts.tts import SmartTTS, synthesize, synthesize_with_template
@@ -30,12 +33,14 @@ __all__ = [
     "CachedVoice",
     "ChainedTemplateRegistry",
     "GenerationTemplate",
+    "HARD_TEMPLATE_FALLBACK",
     "INVESTIGATION",
     "OutputFormat",
     "SmartTTS",
     "SmartTTSConfig",
     "SynthesisResult",
     "SynthesisTask",
+    "SynthesisTimeoutError",
     "TTSModel",
     "TemplateRegistry",
     "VoiceSettings",
@@ -43,6 +48,7 @@ __all__ = [
     "asynthesize_with_template",
     "default_template_registry",
     "get_template",
+    "resolve_request_template",
     "resolve_template",
     "synthesize",
     "synthesize_with_template",

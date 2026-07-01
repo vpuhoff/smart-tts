@@ -6,12 +6,14 @@ from smart_tts.templates._core import (
     get_template,
 )
 from smart_tts.templates.registry import (
+    HARD_TEMPLATE_FALLBACK,
     BuiltinTemplateRegistry,
     ChainedTemplateRegistry,
     JsonFileTemplateRegistry,
     TemplateRegistry,
     TemplateRegistryInfo,
     default_template_registry,
+    resolve_request_template,
     resolve_template,
 )
 
@@ -21,11 +23,13 @@ __all__ = [
     "BuiltinTemplateRegistry",
     "ChainedTemplateRegistry",
     "GenerationTemplate",
+    "HARD_TEMPLATE_FALLBACK",
     "INVESTIGATION",
     "JsonFileTemplateRegistry",
     "TemplateRegistry",
     "TemplateRegistryInfo",
     "default_template_registry",
     "get_template",
+    "resolve_request_template",
     "resolve_template",
 ]

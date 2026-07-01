@@ -7,7 +7,9 @@
   - create_smart_tts_toolset(registry=...)
   - mix=None → mix_default из шаблона
   - run_synthesize_speech(..., template=) с уже resolved шаблоном
-  - on_synthesized hook (post-synthesis delivery)
+  - on_synthesized(ctx, result) hook + make_run_context для fallback
+  - registry.get_default() — template=None без явного slug
+  - run_synthesize_speech(..., timeout_sec=) — pipeline timeout
   - HasSmartTTS protocol (AgentDeps без SmartTTSDeps)
 
 Требуется:
@@ -28,7 +30,6 @@ import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from dotenv import load_dotenv
 from pydantic_ai import Agent, RunContext
@@ -42,6 +43,7 @@ from smart_tts.extensions.pydantic_ai import (
     SynthesizeSpeechResult,
     create_smart_tts_toolset,
     list_generation_templates,
+    make_run_context,
     require_openrouter_api_key,
     resolve_openrouter_model,
     run_preview_speech_text,
@@ -94,14 +96,19 @@ class ExampleTemplateRegistry:
 
     def list_info(self) -> list[TemplateRegistryInfo]:
         brief = self.get("brief")
+        default_slug = self.get_default()
         return [
             TemplateRegistryInfo(
                 name="brief",
                 template=brief,
                 description="Короткие донесения без фона (speech-only).",
+                is_default=default_slug == "brief",
             ),
             *self._fallback.list_info(),
         ]
+
+    def get_default(self) -> str | None:
+        return "brief"
 
 
 def make_toolset(registry: TemplateRegistry | None = None):
@@ -122,6 +129,7 @@ class AgentDeps:
 
     _tts: AsyncSmartTTS
     _output: Path
+    active_agent_id: str = "vox"
 
     @property
     def tts(self) -> AsyncSmartTTS:
@@ -132,27 +140,29 @@ class AgentDeps:
         return self._output
 
 
-def _make_ctx(deps: HasSmartTTS) -> RunContext[HasSmartTTS]:
-    ctx = MagicMock(spec=RunContext)
-    ctx.deps = deps
-    return ctx
-
-
-async def _on_synthesized(result: SynthesizeSpeechResult) -> None:
+async def _on_synthesized(
+    ctx: RunContext[HasSmartTTS],
+    result: SynthesizeSpeechResult,
+) -> None:
     """Post-synthesis hook: в продукте здесь S3 / Telegram / webhook."""
-    print(f"  [on_synthesized] delivered: {result.path} (template={result.template_name})")
+    agent_id = getattr(ctx.deps, "active_agent_id", None)
+    print(
+        f"  [on_synthesized] delivered: {result.path} "
+        f"(template={result.template_name}, agent_id={agent_id})"
+    )
 
 
 async def demo_tools(deps: SmartTTSDeps, registry: ExampleTemplateRegistry) -> Path:
     """Прямой вызов tools из toolset с кастомным registry."""
     toolset = make_toolset(registry)
-    ctx = _make_ctx(deps)
+    ctx = make_run_context(deps)
 
     print("→ list_generation_templates (через registry)")
     for item in list_generation_templates(registry):
         print(
             f"  - {item.name}: {item.description or '—'}, "
             f"mix_default={item.mix_default}, "
+            f"is_default={item.is_default}, "
             f"lang={item.language}, emotion={item.emotion}"
         )
 
@@ -199,8 +209,24 @@ async def demo_tools_via_helper(
         request,
         template=resolved,
         registry=registry,
+        ctx=make_run_context(deps),
+        timeout_sec=30,
     )
     print(f"  path: {result.path}, template_name: {result.template_name}")
+
+    print("\n→ Helper: template=None → registry.get_default() (brief)")
+    default_result = await run_synthesize_speech(
+        deps,
+        SynthesizeSpeechRequest(
+            text="Шаблон по умолчанию из registry.",
+            mix=False,
+            output_filename="pydantic_ai_default_template.mp3",
+        ),
+        registry=registry,
+        ctx=make_run_context(deps),
+        timeout_sec=30,
+    )
+    print(f"  path: {default_result.path}, template_name: {default_result.template_name}")
 
 
 async def demo_has_smart_tts(tts: AsyncSmartTTS, output_dir: Path, registry: ExampleTemplateRegistry) -> None:
@@ -288,7 +314,7 @@ async def demo_agent(
     print(f"\n→ Agent output:\n{result.output}")
 
     if not live:
-        ctx = _make_ctx(deps)
+        ctx = make_run_context(deps)
         synth_request = SynthesizeSpeechRequest(
             text="Срочное донесение. Обнаружена цель.",
             template="brief",

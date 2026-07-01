@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
@@ -9,12 +10,14 @@ import pytest
 import respx
 
 from smart_tts.async_tts import AsyncSmartTTS
+from smart_tts.exceptions import SynthesisTimeoutError
 from smart_tts.extensions.pydantic_ai import (
     PreviewSpeechTextRequest,
     SmartTTSDeps,
     SynthesizeSpeechRequest,
     SynthesizeSpeechResult,
     create_smart_tts_toolset,
+    make_run_context,
     require_openrouter_api_key,
     resolve_openrouter_model,
     run_synthesize_speech,
@@ -303,3 +306,372 @@ async def test_has_smart_tts_protocol_deps(config, sample_voice, tmp_path) -> No
         await tts.aclose()
 
     assert result.template_name == "investigation"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_synthesis_timeout_error(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    async def slow_synth(*args, **kwargs):
+        await asyncio.sleep(0.05)
+        from smart_tts.models import SynthesisResult, TTSModel
+
+        return SynthesisResult(
+            audio=b"mp3-data",
+            enhanced_text="test",
+            model=TTSModel.ELEVEN_V3,
+            voice=sample_voice,
+            metadata={
+                "duration_ms": 100,
+                "mixed": False,
+                "char_count": 4,
+                "voice_id": sample_voice.voice_id,
+                "model": "s2.1-pro",
+                "fish_model": "s2.1-pro",
+                "music": False,
+                "ambient": False,
+            },
+        )
+
+    tts.synthesize_text_to_file = slow_synth  # type: ignore[method-assign]
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path)
+    try:
+        with pytest.raises(SynthesisTimeoutError) as exc_info:
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+                timeout_sec=0.001,
+            )
+    finally:
+        await tts.aclose()
+
+    assert exc_info.value.timeout_sec == 0.001
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_synthesis_no_timeout_regression(config, sample_voice, tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("SMART_TTS_SYNTHESIS_TIMEOUT_SEC", raising=False)
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path)
+
+    with patch("smart_tts.extensions.pydantic_ai.asyncio.wait_for", new=AsyncMock()) as wait_for:
+        try:
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+                timeout_sec=None,
+            )
+        finally:
+            await tts.aclose()
+
+    wait_for.assert_not_called()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_hook_outside_timeout(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    seen: list[SynthesizeSpeechResult] = []
+
+    async def on_synthesized(_ctx, result: SynthesizeSpeechResult) -> None:
+        await asyncio.sleep(0.05)
+        seen.append(result)
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    try:
+        result = await run_synthesize_speech(
+            deps,
+            SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+            timeout_sec=1,
+            ctx=make_run_context(deps),
+        )
+    finally:
+        await tts.aclose()
+
+    assert len(seen) == 1
+    assert result.template_name == "investigation"
+
+
+@pytest.mark.asyncio
+async def test_timeout_invalid(config, sample_voice, tmp_path) -> None:
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path)
+    try:
+        with pytest.raises(ValueError, match="timeout_sec must be positive"):
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation"),
+                timeout_sec=0,
+            )
+    finally:
+        await tts.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_synthesized_with_ctx(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    class ExtendedDeps(SmartTTSDeps):
+        active_agent_id: str = "vox"
+
+    seen_ctx: list[str] = []
+
+    async def on_synthesized(ctx, result: SynthesizeSpeechResult) -> None:
+        seen_ctx.append(getattr(ctx.deps, "active_agent_id", ""))
+
+    deps = ExtendedDeps(
+        tts=tts,
+        output_dir=tmp_path,
+        on_synthesized=on_synthesized,
+    )
+    try:
+        await run_synthesize_speech(
+            deps,
+            SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+            ctx=make_run_context(deps),
+        )
+    finally:
+        await tts.aclose()
+
+    assert seen_ctx == ["vox"]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_synthesized_legacy_deprecation(config, sample_voice, tmp_path) -> None:
+    import smart_tts.extensions.pydantic_ai as pydantic_ai_mod
+
+    pydantic_ai_mod._LEGACY_ON_SYNTHESIZED_WARNED = False
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    seen: list[SynthesizeSpeechResult] = []
+
+    async def on_synthesized(result: SynthesizeSpeechResult) -> None:
+        seen.append(result)
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    try:
+        with pytest.warns(DeprecationWarning, match="on_synthesized\\(result\\)"):
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+            )
+    finally:
+        await tts.aclose()
+
+    assert len(seen) == 1
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_synthesized_hook_exception_propagates(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    async def on_synthesized(_ctx, _result: SynthesizeSpeechResult) -> None:
+        raise RuntimeError("delivery failed")
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    try:
+        with pytest.raises(RuntimeError, match="delivery failed"):
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+                ctx=make_run_context(deps),
+            )
+    finally:
+        await tts.aclose()
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_tool_passes_ctx_to_hook(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    seen_deps: list[SmartTTSDeps] = []
+
+    async def on_synthesized(ctx, _result: SynthesizeSpeechResult) -> None:
+        seen_deps.append(ctx.deps)
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    toolset = create_smart_tts_toolset()
+    synth = toolset.tools["synthesize_speech"].function
+
+    from pydantic_ai import RunContext
+
+    ctx = MagicMock(spec=RunContext)
+    ctx.deps = deps
+
+    try:
+        await synth(
+            ctx,
+            SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+        )
+    finally:
+        await tts.aclose()
+
+    assert seen_deps == [deps]
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_synthesized_not_called_on_synth_error(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(500, content=b"error")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    seen: list[SynthesizeSpeechResult] = []
+
+    async def on_synthesized(_ctx, result: SynthesizeSpeechResult) -> None:
+        seen.append(result)
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    try:
+        with pytest.raises(Exception):
+            await run_synthesize_speech(
+                deps,
+                SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+                ctx=make_run_context(deps),
+            )
+    finally:
+        await tts.aclose()
+
+    assert seen == []
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_on_synthesized_ctx_callback_skipped_without_ctx(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+
+    seen: list[SynthesizeSpeechResult] = []
+
+    async def on_synthesized(_ctx, result: SynthesizeSpeechResult) -> None:
+        seen.append(result)
+
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path, on_synthesized=on_synthesized)
+    try:
+        await run_synthesize_speech(
+            deps,
+            SynthesizeSpeechRequest(text="Тест.", template="investigation", mix=False),
+            ctx=None,
+        )
+    finally:
+        await tts.aclose()
+
+    assert seen == []
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_custom_template_registry_get_default(config, sample_voice, tmp_path) -> None:
+    respx.post("https://api.fish.audio/v1/tts").mock(
+        return_value=httpx.Response(200, content=b"mp3-data")
+    )
+
+    class BriefRegistry:
+        def get(self, name: str) -> GenerationTemplate:
+            if name == "brief":
+                return GenerationTemplate(
+                    name="brief",
+                    voice_id=sample_voice.voice_id,
+                    enhance_text=False,
+                    mix_default=False,
+                )
+            raise KeyError(name)
+
+        def list_info(self) -> list[TemplateRegistryInfo]:
+            return [
+                TemplateRegistryInfo(
+                    name="brief",
+                    template=GenerationTemplate(name="brief"),
+                    description="Brief preset",
+                    is_default=True,
+                )
+            ]
+
+        def get_default(self) -> str | None:
+            return "brief"
+
+    voice_registry = VoiceRegistry(config)
+    voice_registry.register_voice(sample_voice)
+    tts = AsyncSmartTTS(config)
+    tts._registry = voice_registry
+    deps = SmartTTSDeps(tts=tts, output_dir=tmp_path)
+    try:
+        result = await run_synthesize_speech(
+            deps,
+            SynthesizeSpeechRequest(text="Тест.", mix=False),
+            registry=BriefRegistry(),
+        )
+    finally:
+        await tts.aclose()
+
+    assert result.template_name == "brief"
