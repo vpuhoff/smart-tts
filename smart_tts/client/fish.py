@@ -8,6 +8,7 @@ import httpx
 from smart_tts.config import SmartTTSConfig
 from smart_tts.exceptions import FishAPIError
 from smart_tts.models import FISH_MP3_BITRATE_BY_FORMAT, OutputFormat, TTSModel, VoiceSettings
+from smart_tts.telemetry import async_span, set_span_attributes, span
 
 logger = logging.getLogger(__name__)
 
@@ -50,31 +51,45 @@ class FishClient:
         voice_settings: VoiceSettings,
         output_format: OutputFormat,
     ) -> tuple[bytes, str]:
-        payload = self._build_payload(text, voice_id, model, voice_settings, output_format)
-        models_to_try = _models_to_try(model)
+        with span(
+            "smart_tts.fish.synthesize",
+            voice_id=voice_id,
+            model=model.value,
+            char_count=len(text),
+        ) as fish_span:
+            payload = self._build_payload(text, voice_id, model, voice_settings, output_format)
+            models_to_try = _models_to_try(model)
 
-        last_error: FishAPIError | None = None
-        for index, attempt_model in enumerate(models_to_try):
-            try:
-                audio = self._post(payload, attempt_model)
-            except FishAPIError as exc:
-                last_error = exc
-                if exc.status_code == 402 and index + 1 < len(models_to_try):
-                    fallback = models_to_try[index + 1]
-                    logger.warning(
-                        "На Fish Audio модели %s нет кредитов (402), пробую %s",
-                        attempt_model,
-                        fallback,
+            last_error: FishAPIError | None = None
+            for index, attempt_model in enumerate(models_to_try):
+                try:
+                    with span("smart_tts.fish.request", fish_model=attempt_model):
+                        audio = self._post(payload, attempt_model)
+                except FishAPIError as exc:
+                    last_error = exc
+                    if exc.status_code == 402 and index + 1 < len(models_to_try):
+                        fallback = models_to_try[index + 1]
+                        logger.warning(
+                            "На Fish Audio модели %s нет кредитов (402), пробую %s",
+                            attempt_model,
+                            fallback,
+                        )
+                        continue
+                    raise
+                else:
+                    if index > 0:
+                        logger.info("Fish TTS: озвучка через %s", attempt_model)
+                    set_span_attributes(
+                        fish_span,
+                        {
+                            "smart_tts.fish_model": attempt_model,
+                            "smart_tts.audio_bytes": len(audio),
+                        },
                     )
-                    continue
-                raise
-            else:
-                if index > 0:
-                    logger.info("Fish TTS: озвучка через %s", attempt_model)
-                return audio, attempt_model
+                    return audio, attempt_model
 
-        assert last_error is not None
-        raise last_error
+            assert last_error is not None
+            raise last_error
 
     def _post(self, payload: dict[str, Any], model: str) -> bytes:
         response = self._client.post(
@@ -144,31 +159,45 @@ class AsyncFishClient:
         voice_settings: VoiceSettings,
         output_format: OutputFormat,
     ) -> tuple[bytes, str]:
-        payload = FishClient._build_payload(text, voice_id, model, voice_settings, output_format)
-        models_to_try = _models_to_try(model)
+        async with async_span(
+            "smart_tts.fish.synthesize",
+            voice_id=voice_id,
+            model=model.value,
+            char_count=len(text),
+        ) as fish_span:
+            payload = FishClient._build_payload(text, voice_id, model, voice_settings, output_format)
+            models_to_try = _models_to_try(model)
 
-        last_error: FishAPIError | None = None
-        for index, attempt_model in enumerate(models_to_try):
-            try:
-                audio = await self._post(payload, attempt_model)
-            except FishAPIError as exc:
-                last_error = exc
-                if exc.status_code == 402 and index + 1 < len(models_to_try):
-                    fallback = models_to_try[index + 1]
-                    logger.warning(
-                        "На Fish Audio модели %s нет кредитов (402), пробую %s",
-                        attempt_model,
-                        fallback,
+            last_error: FishAPIError | None = None
+            for index, attempt_model in enumerate(models_to_try):
+                try:
+                    async with async_span("smart_tts.fish.request", fish_model=attempt_model):
+                        audio = await self._post(payload, attempt_model)
+                except FishAPIError as exc:
+                    last_error = exc
+                    if exc.status_code == 402 and index + 1 < len(models_to_try):
+                        fallback = models_to_try[index + 1]
+                        logger.warning(
+                            "На Fish Audio модели %s нет кредитов (402), пробую %s",
+                            attempt_model,
+                            fallback,
+                        )
+                        continue
+                    raise
+                else:
+                    if index > 0:
+                        logger.info("Fish TTS: озвучка через %s", attempt_model)
+                    set_span_attributes(
+                        fish_span,
+                        {
+                            "smart_tts.fish_model": attempt_model,
+                            "smart_tts.audio_bytes": len(audio),
+                        },
                     )
-                    continue
-                raise
-            else:
-                if index > 0:
-                    logger.info("Fish TTS: озвучка через %s", attempt_model)
-                return audio, attempt_model
+                    return audio, attempt_model
 
-        assert last_error is not None
-        raise last_error
+            assert last_error is not None
+            raise last_error
 
     async def _post(self, payload: dict[str, Any], model: str) -> bytes:
         response = await self._client.post(

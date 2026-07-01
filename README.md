@@ -360,6 +360,23 @@ uv run python example_pydantic_ai.py --agent --live # агент + OpenRouter LL
 
 Requires `OPENROUTER_API_KEY`. Model is taken from `--model`, `PYDANTIC_AI_MODEL`, or `OPENROUTER_API_TTS_PROMPT_MODEL`.
 
+### OpenTelemetry tracing (optional)
+
+```bash
+pip install smart-tts[otel-sdk]
+```
+
+```python
+from smart_tts.extensions.otel import configure_tracing, shutdown_tracing
+
+configure_tracing()  # uses OTEL_EXPORTER_OTLP_ENDPOINT
+with SmartTTS.from_env() as tts:
+    tts.synthesize_text("Привет!", INVESTIGATION, mix=False)
+shutdown_tracing()
+```
+
+Spans are emitted for synthesis, Fish/ElevenLabs calls, ffmpeg mix, and Pydantic AI tools. Without `opentelemetry-api`, tracing is a no-op.
+
 ### Voice registry
 
 ```python
@@ -385,6 +402,7 @@ Legacy enum names map to Fish Audio models:
 ```
 smart_tts/
 ├── tts.py, async_tts.py     # SmartTTS facade
+├── telemetry.py             # OpenTelemetry spans (optional)
 ├── templates.py             # GenerationTemplate presets
 ├── config.py, models.py
 ├── client/

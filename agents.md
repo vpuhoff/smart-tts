@@ -272,6 +272,50 @@ uv run pytest
 - [ ] `uv run pytest` проходит
 - [ ] Примеры запускаются (`example.py`, при необходимости `example_pydantic_ai.py`)
 
+## OpenTelemetry (spans / traces)
+
+Библиотека создаёт spans автоматически при установленном `opentelemetry-api`:
+
+```bash
+pip install smart-tts[otel]          # только API (no-op без SDK)
+pip install smart-tts[otel-sdk]      # SDK + OTLP exporter
+```
+
+Экспорт traces:
+
+```python
+from smart_tts.extensions.otel import configure_tracing, shutdown_tracing
+
+configure_tracing()  # OTEL_EXPORTER_OTLP_ENDPOINT или console через OTEL_TRACES_CONSOLE=1
+try:
+    ...
+finally:
+    shutdown_tracing()
+```
+
+Иерархия spans:
+
+| Span | Где |
+|------|-----|
+| `smart_tts.synthesize` | `SmartTTS` / `AsyncSmartTTS` |
+| `smart_tts.synthesize_text` | template-based синтез |
+| `smart_tts.mix_layers` | сведение в пайплайне |
+| `smart_tts.remix_file` | remix готовой речи |
+| `smart_tts.fish.synthesize` / `smart_tts.fish.request` | Fish Audio API |
+| `smart_tts.elevenlabs.generate_music` / `generate_ambient` | ElevenLabs beds |
+| `smart_tts.audio.mix_tracks` | ffmpeg |
+| `smart_tts.tool.synthesize_speech` | Pydantic AI tool |
+
+Полезные атрибуты: `smart_tts.voice_id`, `smart_tts.model`, `smart_tts.fish_model`, `smart_tts.mixed`, `smart_tts.template`, `smart_tts.duration_ms`.
+
+Корреляция в логах:
+
+```python
+from smart_tts.telemetry import current_trace_id
+
+trace_id = current_trace_id()
+```
+
 ## Ссылки
 
 - [README.md](README.md) — пользовательская документация

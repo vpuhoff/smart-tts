@@ -9,6 +9,7 @@ from elevenlabs.core.api_error import ApiError
 from smart_tts.audio.mixer import collect_chunks
 from smart_tts.config import SmartTTSConfig
 from smart_tts.exceptions import ElevenLabsAPIError
+from smart_tts.telemetry import span
 
 logger = logging.getLogger(__name__)
 
@@ -60,55 +61,65 @@ class ElevenLabsBedsClient:
         self.close()
 
     def generate_music(self, path: Path, *, prompt: str, duration_ms: int) -> bool:
-        music_length_ms = max(10_000, min(300_000, duration_ms + 12_000))
-        try:
-            audio = collect_chunks(
-                self._client.music.compose(
-                    prompt=prompt,
-                    music_length_ms=music_length_ms,
-                    force_instrumental=True,
-                    output_format="mp3_44100_128",
-                )
-            )
-        except ApiError as exc:
-            if is_permission_error(exc):
-                return False
-            body = exc.body if isinstance(exc.body, dict) else {}
-            detail = body.get("detail", body)
-            if isinstance(detail, dict) and detail.get("code") == "bad_prompt":
-                logger.warning("music_bad_prompt", extra={"prompt": prompt[:80]})
-                try:
-                    audio = collect_chunks(
-                        self._client.music.compose(
-                            prompt=MUSIC_FALLBACK_PROMPT,
-                            music_length_ms=music_length_ms,
-                            force_instrumental=True,
-                            output_format="mp3_44100_128",
-                        )
+        with span(
+            "smart_tts.elevenlabs.generate_music",
+            duration_ms=duration_ms,
+            output_path=str(path),
+        ):
+            music_length_ms = max(10_000, min(300_000, duration_ms + 12_000))
+            try:
+                audio = collect_chunks(
+                    self._client.music.compose(
+                        prompt=prompt,
+                        music_length_ms=music_length_ms,
+                        force_instrumental=True,
+                        output_format="mp3_44100_128",
                     )
-                except ApiError:
+                )
+            except ApiError as exc:
+                if is_permission_error(exc):
                     return False
-            else:
-                _raise_api_error(exc)
-        path.write_bytes(audio)
-        return True
+                body = exc.body if isinstance(exc.body, dict) else {}
+                detail = body.get("detail", body)
+                if isinstance(detail, dict) and detail.get("code") == "bad_prompt":
+                    logger.warning("music_bad_prompt", extra={"prompt": prompt[:80]})
+                    try:
+                        audio = collect_chunks(
+                            self._client.music.compose(
+                                prompt=MUSIC_FALLBACK_PROMPT,
+                                music_length_ms=music_length_ms,
+                                force_instrumental=True,
+                                output_format="mp3_44100_128",
+                            )
+                        )
+                    except ApiError:
+                        return False
+                else:
+                    _raise_api_error(exc)
+            path.write_bytes(audio)
+            return True
 
     def generate_ambient(self, path: Path, *, prompt: str, duration_seconds: float) -> bool:
-        try:
-            audio = collect_chunks(
-                self._client.text_to_sound_effects.convert(
-                    text=prompt,
-                    duration_seconds=max(0.5, min(30.0, duration_seconds)),
-                    loop=True,
-                    prompt_influence=0.5,
+        with span(
+            "smart_tts.elevenlabs.generate_ambient",
+            duration_seconds=duration_seconds,
+            output_path=str(path),
+        ):
+            try:
+                audio = collect_chunks(
+                    self._client.text_to_sound_effects.convert(
+                        text=prompt,
+                        duration_seconds=max(0.5, min(30.0, duration_seconds)),
+                        loop=True,
+                        prompt_influence=0.5,
+                    )
                 )
-            )
-        except ApiError as exc:
-            if is_permission_error(exc):
-                return False
-            _raise_api_error(exc)
-        path.write_bytes(audio)
-        return True
+            except ApiError as exc:
+                if is_permission_error(exc):
+                    return False
+                _raise_api_error(exc)
+            path.write_bytes(audio)
+            return True
 
 
 class AsyncElevenLabsBedsClient:

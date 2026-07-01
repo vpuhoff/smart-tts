@@ -55,6 +55,7 @@ from smart_tts.async_tts import AsyncSmartTTS
 from smart_tts.audio.probe import audio_duration_seconds
 from smart_tts.config import SmartTTSConfig
 from smart_tts.templates import BUILTIN_TEMPLATES, GenerationTemplate, get_template
+from smart_tts.telemetry import async_span
 from smart_tts.text import prepare_text
 
 __all__ = [
@@ -312,34 +313,40 @@ async def run_synthesize_speech(
     deps: SmartTTSDeps,
     request: SynthesizeSpeechRequest,
 ) -> SynthesizeSpeechResult:
-    template = _resolve_template(request.template)
-    overrides: dict[str, Any] = {}
-    if request.emotion is not None:
-        overrides["emotion"] = request.emotion
-
-    output_path = _output_path(deps, template.name, request.output_filename)
-    result = await deps.tts.synthesize_text_to_file(
-        request.text,
-        template,
-        output_path,
+    async with async_span(
+        "smart_tts.tool.synthesize_speech",
+        template=request.template,
         mix=request.mix,
-        **overrides,
-    )
-    duration_ms = result.metadata.get("duration_ms")
-    if isinstance(duration_ms, (int, float)):
-        duration = max(duration_ms / 1000.0, 0.0)
-    else:
-        duration = audio_duration_seconds(output_path)
+        char_count=len(request.text),
+    ):
+        template = _resolve_template(request.template)
+        overrides: dict[str, Any] = {}
+        if request.emotion is not None:
+            overrides["emotion"] = request.emotion
 
-    return SynthesizeSpeechResult(
-        path=str(output_path.resolve()),
-        duration_seconds=duration,
-        enhanced_text=result.enhanced_text,
-        model=result.model.value,
-        voice_id=result.voice.voice_id,
-        mixed=bool(result.metadata.get("mixed")),
-        metadata=SynthesisMetadata.model_validate(result.metadata),
-    )
+        output_path = _output_path(deps, template.name, request.output_filename)
+        result = await deps.tts.synthesize_text_to_file(
+            request.text,
+            template,
+            output_path,
+            mix=request.mix,
+            **overrides,
+        )
+        duration_ms = result.metadata.get("duration_ms")
+        if isinstance(duration_ms, (int, float)):
+            duration = max(duration_ms / 1000.0, 0.0)
+        else:
+            duration = audio_duration_seconds(output_path)
+
+        return SynthesizeSpeechResult(
+            path=str(output_path.resolve()),
+            duration_seconds=duration,
+            enhanced_text=result.enhanced_text,
+            model=result.model.value,
+            voice_id=result.voice.voice_id,
+            mixed=bool(result.metadata.get("mixed")),
+            metadata=SynthesisMetadata.model_validate(result.metadata),
+        )
 
 
 def create_smart_tts_toolset() -> FunctionToolset[SmartTTSDeps]:
