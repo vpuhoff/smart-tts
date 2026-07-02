@@ -141,7 +141,11 @@ class AsyncElevenLabsBedsClient:
 
     async def aclose(self) -> None:
         if self._owns_client:
-            await self._client._client_wrapper.httpx_client.httpx_client.aclose()
+            import asyncio
+
+            await asyncio.to_thread(
+                self._client._client_wrapper.httpx_client.httpx_client.close
+            )
 
     async def __aenter__(self) -> AsyncElevenLabsBedsClient:
         return self
