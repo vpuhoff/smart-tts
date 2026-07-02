@@ -31,6 +31,35 @@ def _raise_api_error(exc: ApiError) -> None:
     raise ElevenLabsAPIError(exc.status_code or 0, body) from exc
 
 
+def _elevenlabs_http_client(client: ElevenLabs):
+    return client._client_wrapper.httpx_client.httpx_client
+
+
+def _close_elevenlabs_http_client(client: ElevenLabs) -> None:
+    """Close the underlying httpx client owned by an ElevenLabs SDK instance."""
+    httpx_client = _elevenlabs_http_client(client)
+    close = getattr(httpx_client, "close", None)
+    if close is None:
+        raise TypeError(f"Unsupported httpx client type for close: {type(httpx_client)!r}")
+    close()
+
+
+async def _aclose_elevenlabs_http_client(client: ElevenLabs) -> None:
+    """Close the ElevenLabs httpx client without blocking the event loop."""
+    import asyncio
+
+    httpx_client = _elevenlabs_http_client(client)
+    aclose = getattr(httpx_client, "aclose", None)
+    if aclose is not None:
+        await aclose()
+        return
+    close = getattr(httpx_client, "close", None)
+    if close is None:
+        raise TypeError(f"Unsupported httpx client type for aclose: {type(httpx_client)!r}")
+    # ElevenLabs SDK 2.x wraps a synchronous httpx.Client (close only, no aclose).
+    await asyncio.to_thread(close)
+
+
 class ElevenLabsBedsClient:
     """ElevenLabs music and ambient generation (not speech TTS)."""
 
@@ -52,7 +81,7 @@ class ElevenLabsBedsClient:
 
     def close(self) -> None:
         if self._owns_client:
-            self._client._client_wrapper.httpx_client.httpx_client.close()
+            _close_elevenlabs_http_client(self._client)
 
     def __enter__(self) -> ElevenLabsBedsClient:
         return self
@@ -141,11 +170,7 @@ class AsyncElevenLabsBedsClient:
 
     async def aclose(self) -> None:
         if self._owns_client:
-            import asyncio
-
-            await asyncio.to_thread(
-                self._client._client_wrapper.httpx_client.httpx_client.close
-            )
+            await _aclose_elevenlabs_http_client(self._client)
 
     async def __aenter__(self) -> AsyncElevenLabsBedsClient:
         return self
